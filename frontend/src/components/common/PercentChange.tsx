@@ -9,7 +9,6 @@ interface PercentChangeProps {
 
 export function PercentChange({ value, className, invertColor = false }: PercentChangeProps) {
   const isPositive = value > 0
-  const isNegative = value < 0
   const isZero = value === 0
 
   const colorClass = isZero

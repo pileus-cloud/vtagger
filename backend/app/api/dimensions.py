@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from app.database import execute_query, execute_write
 from app.services.mapping_engine import mapping_engine
-from app.services.dsl_parser import validate_dimension_json
+from app.core.dsl_parser import validate_dimension_json
 from app.services.tag_discovery import tag_discovery_service
 
 router = APIRouter(prefix="/dimensions", tags=["dimensions"])

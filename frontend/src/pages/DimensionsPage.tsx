@@ -326,7 +326,7 @@ export function DimensionsPage() {
                     className="w-full h-64 p-3 font-mono text-xs border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
                     value={jsonContent}
                     onChange={(e) => setJsonContent(e.target.value)}
-                    placeholder='{\n  "vtag_name": "my_dimension",\n  "index": 0,\n  "defaultValue": "Unallocated",\n  "statements": [\n    {\n      "matchExpression": "TAG[\'key\'] == \'value\'",\n      "valueExpression": "\'Result\'"\n    }\n  ]\n}'
+                    placeholder={`{\n  "vtag_name": "my_dimension",\n  "index": 0,\n  "defaultValue": "Unallocated",\n  "statements": [\n    {\n      "matchExpression": "TAG['key'] == 'value'",\n      "valueExpression": "'Result'"\n    }\n  ]\n}`}
                   />
                 )}
 
