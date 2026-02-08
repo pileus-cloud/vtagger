@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vtagger-backend
+    restart: unless-stopped
+    environment:
+      - VTAGGER_DATABASE_PATH=/app/data/vtagger.db
+      - VTAGGER_OUTPUT_DIR=/app/output
+      - VTAGGER_DEV_MODE=false
+      - VTAGGER_UMBRELLA_API_BASE=https://api.umbrellacost.io/api
+      - VTAGGER_MASTER_KEY=${VTAGGER_MASTER_KEY:-}
+    volumes:
+      - vtagger-data:/app/data
+      - vtagger-output:/app/output
+    networks:
+      - vtagger-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/status/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vtagger-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - vtagger-network
+
+  cron:
+    build:
+      context: ./cron
+      dockerfile: Dockerfile
+    container_name: vtagger-cron
+    restart: unless-stopped
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - SYNC_CRON_SCHEDULE=${SYNC_CRON_SCHEDULE:-0 2 * * *}
+      - CLEANUP_RETENTION_DAYS=${CLEANUP_RETENTION_DAYS:-30}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - vtagger-network
+
+networks:
+  vtagger-network:
+    driver: bridge
+
+volumes:
+  vtagger-data:
+  vtagger-output:

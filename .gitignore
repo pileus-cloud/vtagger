@@ -1,0 +1,87 @@
+# ============================================
+# VTagger .gitignore
+# ============================================
+
+# Secrets & Credentials
+.env
+.env.*
+!.env.example
+config.yaml
+!config.example.yaml
+*credentials*
+*secret*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Large data files
+assets_output*.json
+virtual_tags_*.csv
+virtual_tags_*.csv.gz
+*.csv
+*.csv.gz
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+/lib/
+/lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.venv/
+ENV/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
