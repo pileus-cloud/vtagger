@@ -35,7 +35,7 @@ from app.services.month_sync_service import month_sync_service
 from app.services.vtag_upload_service import vtag_upload_service
 from app.services.cleanup_service import cleanup_service
 from app.services.progress_tracker import progress_tracker, AgentState
-from app.api.auth import get_login_key
+from app.services.credential_manager import has_credentials
 
 router = APIRouter(prefix="/status", tags=["status"])
 
@@ -121,14 +121,12 @@ async def health_check():
     except Exception:
         db_status = "error"
 
-    has_key = get_login_key() is not None
-
     return HealthResponse(
         status="healthy" if db_status == "ok" else "degraded",
         version="1.0.0",
         database=db_status,
         dimensions_loaded=len(mapping_engine.dimensions),
-        api_key_configured=has_key,
+        api_key_configured=has_credentials(),
         uptime_seconds=round(time.time() - _start_time, 1),
     )
 
@@ -199,19 +197,11 @@ async def start_simulation(
             status_code=409, detail="An operation is already running."
         )
 
-    # Ensure authenticated
-    login_key = get_login_key()
-    if not login_key:
-        raise HTTPException(
-            status_code=401, detail="No login key configured."
-        )
-
-    if not umbrella_client.is_authenticated():
-        success = umbrella_client.authenticate(login_key)
-        if not success:
-            raise HTTPException(
-                status_code=401, detail="Authentication failed."
-            )
+    # Ensure authenticated via credential manager
+    try:
+        umbrella_client._ensure_authenticated()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
     # Ensure dimensions loaded
     if not mapping_engine.dimensions:
@@ -270,14 +260,10 @@ async def start_week_sync(
             status_code=409, detail="An operation is already running."
         )
 
-    login_key = get_login_key()
-    if not login_key:
-        raise HTTPException(status_code=401, detail="No login key configured.")
-
-    if not umbrella_client.is_authenticated():
-        success = umbrella_client.authenticate(login_key)
-        if not success:
-            raise HTTPException(status_code=401, detail="Authentication failed.")
+    try:
+        umbrella_client._ensure_authenticated()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
     if not mapping_engine.dimensions:
         mapping_engine.load_dimensions()
@@ -321,14 +307,10 @@ async def start_month_sync(
             status_code=409, detail="An operation is already running."
         )
 
-    login_key = get_login_key()
-    if not login_key:
-        raise HTTPException(status_code=401, detail="No login key configured.")
-
-    if not umbrella_client.is_authenticated():
-        success = umbrella_client.authenticate(login_key)
-        if not success:
-            raise HTTPException(status_code=401, detail="Authentication failed.")
+    try:
+        umbrella_client._ensure_authenticated()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
     if not mapping_engine.dimensions:
         mapping_engine.load_dimensions()
@@ -370,14 +352,10 @@ async def start_range_sync(
             status_code=409, detail="An operation is already running."
         )
 
-    login_key = get_login_key()
-    if not login_key:
-        raise HTTPException(status_code=401, detail="No login key configured.")
-
-    if not umbrella_client.is_authenticated():
-        success = umbrella_client.authenticate(login_key)
-        if not success:
-            raise HTTPException(status_code=401, detail="Authentication failed.")
+    try:
+        umbrella_client._ensure_authenticated()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
     if not mapping_engine.dimensions:
         mapping_engine.load_dimensions()
@@ -436,14 +414,10 @@ async def upload_vtags(
     background_tasks: BackgroundTasks,
 ):
     """Upload vtags from a JSONL output file to Umbrella."""
-    login_key = get_login_key()
-    if not login_key:
-        raise HTTPException(status_code=401, detail="No login key configured.")
-
-    if not umbrella_client.is_authenticated():
-        success = umbrella_client.authenticate(login_key)
-        if not success:
-            raise HTTPException(status_code=401, detail="Authentication failed.")
+    try:
+        umbrella_client._ensure_authenticated()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
     if not os.path.exists(request.jsonl_file):
         raise HTTPException(

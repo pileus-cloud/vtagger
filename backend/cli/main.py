@@ -355,7 +355,6 @@ def sync(account_key: str, start_date: str, end_date: str, vtag_filter: tuple):
     from app.services.mapping_engine import mapping_engine
     from app.services.umbrella_client import umbrella_client
     from app.services.sync_service import sync_service
-    from app.api.auth import get_login_key
 
     click.echo("VTagger - Virtual Tagging Agent")
     click.echo("=" * 40)
@@ -367,15 +366,12 @@ def sync(account_key: str, start_date: str, end_date: str, vtag_filter: tuple):
         sys.exit(1)
     click.echo(f"Dimensions loaded: {len(mapping_engine.dimensions)}")
 
-    # Authenticate
-    login_key = get_login_key()
-    if not login_key:
-        click.echo("Error: No login key configured. Use 'vtagger credentials set' first.", err=True)
-        sys.exit(1)
-
+    # Authenticate via credential manager
     click.echo("Authenticating...")
-    if not umbrella_client.authenticate(login_key):
-        click.echo("Error: Authentication failed.", err=True)
+    try:
+        umbrella_client._ensure_authenticated()
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
         sys.exit(1)
     click.echo("Authenticated successfully.")
 
@@ -524,7 +520,6 @@ def info():
     from app.config import settings
     from app.services.mapping_engine import mapping_engine
     from app.services.credential_manager import has_credentials
-    from app.api.auth import get_login_key
 
     click.echo("VTagger - Virtual Tagging Agent")
     click.echo("=" * 40)
@@ -538,8 +533,6 @@ def info():
     click.echo(f"Dimensions:     {len(mapping_engine.dimensions)}")
     click.echo(f"Tag keys:       {len(mapping_engine.get_required_tag_keys())}")
 
-    login_key = get_login_key()
-    click.echo(f"Login key:      {'configured' if login_key else 'not set'}")
     click.echo(f"Credentials:    {'configured' if has_credentials() else 'not set'}")
 
 

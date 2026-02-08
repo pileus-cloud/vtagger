@@ -18,8 +18,8 @@ from app.api import (
     jobs_router,
     stats_router,
 )
-from app.api.auth import get_login_key
 from app.services.mapping_engine import mapping_engine
+from app.services.credential_manager import has_credentials
 
 
 @asynccontextmanager
@@ -33,11 +33,10 @@ async def lifespan(app: FastAPI):
     init_database()
     print(f"  Database: {settings.database_path}")
 
-    existing_key = get_login_key()
-    if existing_key:
-        print("  Login Key: (configured)")
+    if has_credentials():
+        print("  Credentials: (configured)")
     else:
-        print("  Login Key: (not set - generate from web UI)")
+        print("  Credentials: (not set - use CLI or environment variables)")
 
     print("\nLoading configuration...")
     mapping_engine.load_dimensions()

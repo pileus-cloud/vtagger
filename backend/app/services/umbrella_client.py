@@ -2,115 +2,169 @@
 VTagger Umbrella Client.
 
 Handles authenticated communication with the Umbrella Cost API:
-  - Keycloak OAuth2 token acquisition
+  - Keycloak UM 2.0 authentication (Basic Auth + JWT)
   - Account listing
   - Streaming asset/resource fetches with dynamic tag columns
-  - Virtual tag uploads and import monitoring
-
-Ported from BPVtagger with the following changes:
-  - Removed hardcoded customTagValue_4-8 column mappings
-  - Removed get_linked_account_names() (BP-specific)
-  - Added dynamic tag_keys parameter for column building
-  - Added vtag_filter_dimensions parameter for selective sync filtering
+  - Virtual tag uploads via presigned URL and import monitoring
 """
 
+import base64
 import csv
+import gzip
 import io
 import json
+import os
+import tempfile
 import time
-import urllib.parse
 from datetime import datetime, timedelta
-from typing import Dict, Generator, List, Optional, Set
+from typing import Dict, Generator, List, Optional, Set, Tuple
+from urllib.parse import urlencode
 
-import requests
+import httpx
 
 from app.config import settings
+from app.services.credential_manager import get_credentials, has_credentials
 from app.services.agent_logger import log_timing
 
 
 class UmbrellaClient:
-    """Client for the Umbrella Cost Management API."""
+    """Client for the Umbrella Cost Management API using Keycloak UM 2.0."""
 
     def __init__(self):
         self.base_url = settings.umbrella_api_base
-        self.token: Optional[str] = None
-        self.token_expiry: float = 0.0
-        self._session = requests.Session()
-        self._session.headers.update({
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        })
+        self.jwt_token: Optional[str] = None
+        self.user_key: Optional[str] = None
+        self.token_expiry: Optional[datetime] = None
 
     # ------------------------------------------------------------------
-    # Authentication (Keycloak)
+    # Authentication (Keycloak UM 2.0)
     # ------------------------------------------------------------------
 
-    def authenticate(self, login_key: str) -> bool:
-        """
-        Authenticate with the Umbrella API via Keycloak.
+    def _ensure_authenticated(self):
+        """Ensure we have a valid authentication token, re-authenticating if needed."""
+        if self.jwt_token and self.token_expiry:
+            buffer = timedelta(minutes=5)
+            if datetime.now() < (self.token_expiry - buffer):
+                return  # Token still valid
 
-        The login_key is exchanged for an OAuth2 bearer token.
-        Returns True on success.
+        if not self.authenticate():
+            raise Exception("Authentication failed")
+
+    def authenticate(self) -> bool:
         """
-        token_url = f"{self.base_url}/auth/token"
-        try:
-            resp = self._session.post(
-                token_url,
-                json={"loginKey": login_key},
-                timeout=30,
+        Authenticate using Keycloak UM 2.0.
+
+        Reads username/password from the credential manager (env vars, keyring,
+        or encrypted config file) and exchanges them for a JWT bearer token.
+        """
+        creds = get_credentials()
+        if creds is None:
+            raise Exception(
+                "Credentials not available. "
+                "Set via environment variables (VTAGGER_USERNAME / VTAGGER_PASSWORD), "
+                "keyring, or 'vtagger credentials set' CLI command."
             )
-            resp.raise_for_status()
-            data = resp.json()
 
-            self.token = data.get("access_token") or data.get("token")
-            if not self.token:
-                log_timing("AUTH: No token in response")
+        username, password = creds
+
+        # Basic Auth header
+        basic_auth = base64.b64encode(f"{username}:{password}".encode()).decode()
+
+        url = f"{self.base_url}/v1/authentication/token/generate"
+        headers = {
+            "Authorization": f"Basic {basic_auth}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {
+            "username": username,
+            "password": password,
+        }
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(url, json=payload, headers=headers)
+
+                if response.status_code == 200:
+                    data = response.json()
+                    self.jwt_token = data.get("Authorization")
+                    temp_apikey = data.get("apikey", "")
+                    self.user_key = temp_apikey.split(":")[0] if temp_apikey else None
+                    self.token_expiry = datetime.now() + timedelta(hours=1)
+                    log_timing("AUTH: Authenticated successfully")
+                    return True
+
+                log_timing(f"AUTH: Failed - {response.status_code} {response.text}")
                 return False
 
-            # Default expiry: 55 minutes (Keycloak tokens typically last 60 min)
-            expires_in = data.get("expires_in", 3300)
-            self.token_expiry = time.time() + expires_in
-
-            self._session.headers["Authorization"] = f"Bearer {self.token}"
-            log_timing("AUTH: Authenticated successfully")
-            return True
-
-        except requests.RequestException as exc:
-            log_timing(f"AUTH: Authentication failed - {exc}")
+        except httpx.RequestError as exc:
+            log_timing(f"AUTH: Request error - {exc}")
             return False
 
     def is_authenticated(self) -> bool:
         """Check whether we hold a valid (non-expired) token."""
-        return self.token is not None and time.time() < self.token_expiry
+        if not self.jwt_token or not self.token_expiry:
+            return False
+        buffer = timedelta(minutes=5)
+        return datetime.now() < (self.token_expiry - buffer)
 
-    def _ensure_auth(self):
-        """Raise if not authenticated."""
-        if not self.is_authenticated():
-            raise RuntimeError("Not authenticated - call authenticate() first")
+    def _build_headers(self, account_key: Optional[str] = None) -> Dict[str, str]:
+        """Build request headers with JWT and optional apikey."""
+        headers = {
+            "Authorization": self.jwt_token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if account_key is not None:
+            headers["apikey"] = f"{self.user_key}:{account_key}:0"
+        else:
+            headers["apikey"] = f"{self.user_key}:-1:-1"
+        return headers
 
     # ------------------------------------------------------------------
     # Accounts
     # ------------------------------------------------------------------
 
-    def get_accounts(self) -> List[Dict]:
+    def get_accounts(self) -> Tuple[List[Dict], List[Dict]]:
         """
         Fetch the list of cloud accounts from Umbrella.
 
-        Returns a list of account dicts with at minimum:
-            accountKey, accountId, accountName, provider
+        Returns:
+            Tuple of (aggregate_accounts, individual_accounts).
         """
-        self._ensure_auth()
-        url = f"{self.base_url}/accounts"
-        try:
-            resp = self._session.get(url, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            accounts = data if isinstance(data, list) else data.get("accounts", [])
-            log_timing(f"ACCOUNTS: Fetched {len(accounts)} accounts")
-            return accounts
-        except requests.RequestException as exc:
-            log_timing(f"ACCOUNTS: Failed - {exc}")
-            raise
+        self._ensure_authenticated()
+
+        url = f"{self.base_url}/v1/user-management/accounts"
+        headers = self._build_headers()
+
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get(url, headers=headers)
+
+            # Retry once on 401
+            if response.status_code == 401:
+                self.jwt_token = None
+                self._ensure_authenticated()
+                headers = self._build_headers()
+                response = client.get(url, headers=headers)
+
+            if response.status_code != 200:
+                raise Exception(f"Failed to get accounts: {response.status_code}")
+
+            accounts = response.json()
+
+            aggregate_accounts = []
+            individual_accounts = []
+            for acc in accounts:
+                if acc.get("isAllAccounts", False):
+                    aggregate_accounts.append(acc)
+                else:
+                    individual_accounts.append(acc)
+
+            log_timing(
+                f"ACCOUNTS: {len(aggregate_accounts)} aggregate, "
+                f"{len(individual_accounts)} individual"
+            )
+            return aggregate_accounts, individual_accounts
 
     # ------------------------------------------------------------------
     # Asset / Resource streaming
@@ -130,7 +184,7 @@ class UmbrellaClient:
         vtag_filter_dimensions: List[str] = None,
     ) -> Generator[List[Dict], None, None]:
         """
-        Stream asset rows from the Umbrella export endpoint in batches.
+        Stream asset rows from the Umbrella v2 export endpoint in batches.
 
         Parameters
         ----------
@@ -139,16 +193,14 @@ class UmbrellaClient:
         start_date, end_date : str
             Date range in YYYY-MM-DD format.
         batch_size : int
-            Number of rows per page.
-        exclude_tagged : bool
-            Legacy flag; kept for backwards compatibility.
+            Number of rows per batch to yield.
         max_pages : int
             Stop after this many pages (0 = unlimited).
         progress_callback : callable, optional
             Called with (page_number, row_count) after each page.
         filter_mode : str
-            "not_vtagged" to filter resources that have no virtual tags yet,
-            "all" to return every resource.
+            "not_vtagged" - only resources missing vtags for the specified dimensions,
+            "all" - every resource (no governance filter).
         tag_keys : set of str, optional
             Physical tag keys to include as dynamic columns.
         vtag_filter_dimensions : list of str, optional
@@ -159,9 +211,10 @@ class UmbrellaClient:
         list of dict
             A batch of resource rows.
         """
-        self._ensure_auth()
+        self._ensure_authenticated()
 
-        url = f"{self.base_url}/exports/resources/{account_key}"
+        headers = self._build_headers(account_key)
+        url = f"{self.base_url.replace('/v1', '')}/v2/usage/assets"
 
         # ---- Build query parameters ----
         params = [
@@ -180,214 +233,244 @@ class UmbrellaClient:
                 params.append(("columns", f"customtags:{key}"))
 
         # Standard cost columns
-        params.append(("columns", "costType"))
-        params.append(("columns", "isUnblended"))
+        params.append(("costType", "cost"))
+        params.append(("isUnblended", "false"))
 
-        # Pagination
-        params.append(("pageSize", str(batch_size)))
+        next_token = None
+        batch = []
+        page_count = 0
+        total_records = 0
 
-        # ---- Build governance tags filter ----
-        if filter_mode == "not_vtagged" and vtag_filter_dimensions:
-            filter_parts = [f"{dim}: no_tag" for dim in vtag_filter_dimensions]
-            filter_value = ",".join(filter_parts)
-            params.append(("governance_tags_keys", filter_value))
-        # If filter_mode == "not_vtagged" but no dimensions specified, skip filter
-        # If filter_mode == "all", no governance filter applied
+        with httpx.Client(timeout=600.0) as client:
+            while True:
+                page_count += 1
 
-        page = 1
-        total_fetched = 0
+                request_params = list(params)
+                if next_token:
+                    request_params.append(("token", next_token))
 
-        while True:
-            page_params = list(params) + [("page", str(page))]
-            query_string = urllib.parse.urlencode(page_params)
-            full_url = f"{url}?{query_string}"
+                query_string = urlencode(request_params)
 
-            try:
-                log_timing(f"FETCH: Page {page} for account {account_key}")
-                resp = self._session.get(full_url, timeout=120)
-                resp.raise_for_status()
-            except requests.RequestException as exc:
-                log_timing(f"FETCH: Page {page} failed - {exc}")
-                raise
+                # Add governance tags filter for not_vtagged mode
+                if filter_mode == "not_vtagged" and vtag_filter_dimensions:
+                    for dim in vtag_filter_dimensions:
+                        query_string += f"&filters%5Bgovernance_tags_keys%5D={dim}%3A%20no_tag"
+                # filter_mode == "all" -> no governance filter
 
-            data = resp.json()
+                full_url = f"{url}?{query_string}"
 
-            # The API may return rows under "data", "resources", or at top level
-            rows = data if isinstance(data, list) else data.get("data") or data.get("resources", [])
+                try:
+                    log_timing(f"FETCH: Page {page_count} for account {account_key}")
+                    response = client.get(full_url, headers=headers)
 
-            if not rows:
-                log_timing(f"FETCH: No more rows at page {page}")
-                break
+                    # Handle token expiration
+                    if response.status_code == 401:
+                        log_timing("FETCH: Token expired, re-authenticating...")
+                        self.jwt_token = None
+                        self._ensure_authenticated()
+                        headers = self._build_headers(account_key)
+                        response = client.get(full_url, headers=headers)
 
-            # Normalise tag columns: "customtags:KeyName" -> "Tag: KeyName"
-            normalised_rows = []
-            for row in rows:
-                normalised = {}
-                for k, v in row.items():
-                    if k.startswith("customtags:"):
-                        tag_name = k[len("customtags:"):]
-                        normalised[f"Tag: {tag_name}"] = v if v else "no tag"
-                    else:
-                        normalised[k] = v
-                normalised_rows.append(normalised)
+                    if response.status_code != 200:
+                        raise Exception(
+                            f"Failed to fetch assets: {response.status_code}"
+                        )
 
-            total_fetched += len(normalised_rows)
-            log_timing(f"FETCH: Page {page} returned {len(normalised_rows)} rows (total: {total_fetched})")
+                except httpx.RequestError as exc:
+                    log_timing(f"FETCH: Page {page_count} failed - {exc}")
+                    raise
 
-            if progress_callback:
-                progress_callback(page, total_fetched)
+                result = response.json()
+                data = result.get("data", [])
+                total_records += len(data)
 
-            yield normalised_rows
+                log_timing(
+                    f"FETCH: Page {page_count} returned {len(data)} rows "
+                    f"(total: {total_records})"
+                )
 
-            # Check for end of data
-            if len(rows) < batch_size:
-                break
+                if progress_callback:
+                    progress_callback(page_count, total_records)
 
-            # Check max pages limit
-            if max_pages and page >= max_pages:
-                log_timing(f"FETCH: Reached max_pages limit ({max_pages})")
-                break
+                for asset in data:
+                    batch.append(asset)
+                    if len(batch) >= batch_size:
+                        yield batch
+                        batch = []
 
-            page += 1
+                next_token = result.get("nextToken")
+                if not next_token:
+                    log_timing(
+                        f"FETCH: Complete - {total_records} records "
+                        f"in {page_count} pages"
+                    )
+                    break
 
-        log_timing(f"FETCH: Stream complete - {total_fetched} total rows across {page} pages")
+                if max_pages > 0 and page_count >= max_pages:
+                    log_timing(
+                        f"FETCH: Reached max_pages limit ({max_pages}), "
+                        f"total: {total_records} records"
+                    )
+                    break
+
+            # Yield remaining
+            if batch:
+                yield batch
 
     # ------------------------------------------------------------------
-    # Virtual Tag Upload
+    # Virtual Tag Upload (presigned URL flow)
     # ------------------------------------------------------------------
 
-    def upload_virtual_tags(self, account_key: str, vtag_csv_content: str) -> Dict:
+    def upload_virtual_tags(
+        self,
+        csv_path: str,
+        account_id: str,
+        compressed: bool = True,
+    ) -> str:
         """
-        Upload a CSV of virtual tag assignments to Umbrella.
+        Upload virtual tags CSV to Umbrella via presigned URL.
 
         Parameters
         ----------
-        account_key : str
-            The Umbrella account key.
-        vtag_csv_content : str
-            CSV content with columns: resourceId, vtagName, vtagValue, ...
+        csv_path : str
+            Path to the CSV file on disk.
+        account_id : str
+            The cloud account ID (AWS or Azure).
+        compressed : bool
+            Whether to gzip-compress the upload.
 
         Returns
         -------
-        dict
-            API response with import job status.
+        str
+            The upload ID for monitoring progress.
         """
-        self._ensure_auth()
+        self._ensure_authenticated()
 
-        url = f"{self.base_url}/imports/vtags/{account_key}"
+        # Find account_key for this account_id
+        aggregate_accounts, individual_accounts = self.get_accounts()
+        account_key = None
 
-        # Count rows for logging
-        reader = csv.reader(io.StringIO(vtag_csv_content))
-        row_count = sum(1 for _ in reader) - 1  # subtract header
+        for acc in individual_accounts + aggregate_accounts:
+            if acc.get("accountId") == account_id or acc.get("accountName") == account_id:
+                account_key = acc.get("accountKey")
+                break
 
-        log_timing(f"UPLOAD: Uploading {row_count} virtual tag rows to account {account_key}")
+        if not account_key:
+            raise Exception(f"Account not found: {account_id}")
 
-        try:
-            resp = self._session.post(
-                url,
-                data=vtag_csv_content,
-                headers={
-                    "Content-Type": "text/csv",
-                    "Authorization": f"Bearer {self.token}",
-                },
-                timeout=120,
+        headers = self._build_headers(account_key)
+
+        # Step 1: Get presigned upload URL
+        url = (
+            f"{self.base_url.replace('/v1', '')}"
+            f"/v1/governance-tags/resources/import/generate-upload-url"
+        )
+        payload = {
+            "accountId": account_id,
+            "compressed": compressed,
+            "mode": "replace",
+        }
+
+        with httpx.Client(timeout=300.0) as client:
+            response = client.post(url, json=payload, headers=headers)
+
+            if response.status_code != 200:
+                raise Exception(
+                    f"Failed to get upload URL: {response.status_code}"
+                )
+
+            result = response.json()
+            upload_url = result.get("uploadUrl")
+            upload_id = result.get("uploadId")
+
+            if not upload_url or not upload_id:
+                raise Exception("Invalid upload URL response")
+
+            log_timing(f"UPLOAD: Got presigned URL for upload {upload_id}")
+
+            # Step 2: Upload the file
+            with open(csv_path, "rb") as f:
+                file_data = f.read()
+
+            upload_headers = {"Content-Type": "text/csv"}
+            if compressed:
+                upload_headers["Content-Encoding"] = "gzip"
+
+            upload_response = client.put(
+                upload_url, content=file_data, headers=upload_headers
             )
-            resp.raise_for_status()
-            result = resp.json()
-            log_timing(f"UPLOAD: Success - {result}")
-            return result
 
-        except requests.RequestException as exc:
-            log_timing(f"UPLOAD: Failed - {exc}")
-            raise
+            if upload_response.status_code not in (200, 201):
+                raise Exception(
+                    f"Failed to upload file: {upload_response.status_code}"
+                )
+
+            log_timing(f"UPLOAD: File uploaded successfully (upload_id={upload_id})")
+            return upload_id
 
     # ------------------------------------------------------------------
     # Import Monitoring
     # ------------------------------------------------------------------
 
-    def monitor_import(self, account_key: str, import_id: str, poll_interval: int = 10, max_wait: int = 600) -> Dict:
+    def monitor_import(self, upload_id: str) -> Generator[Dict, None, None]:
         """
-        Poll the import status until it completes or times out.
+        Poll the import status until it completes, fails, or is cancelled.
 
-        Parameters
-        ----------
-        account_key : str
-            The Umbrella account key.
-        import_id : str
-            The import job ID returned by upload_virtual_tags.
-        poll_interval : int
-            Seconds between status checks.
-        max_wait : int
-            Maximum seconds to wait.
-
-        Returns
-        -------
-        dict
-            Final import status.
+        Yields progress update dictionaries.
         """
-        self._ensure_auth()
+        self._ensure_authenticated()
 
-        url = f"{self.base_url}/imports/vtags/{account_key}/{import_id}/status"
-        start_time = time.time()
+        # Get any account key for monitoring
+        aggregate_accounts, individual_accounts = self.get_accounts()
+        if not individual_accounts and not aggregate_accounts:
+            raise Exception("No accounts available")
 
-        while True:
-            elapsed = time.time() - start_time
-            if elapsed > max_wait:
-                log_timing(f"MONITOR: Timed out after {max_wait}s for import {import_id}")
-                return {"status": "timeout", "import_id": import_id, "elapsed": elapsed}
+        account_key = (individual_accounts or aggregate_accounts)[0].get("accountKey")
+        headers = self._build_headers(account_key)
 
-            try:
-                resp = self._session.get(url, timeout=30)
-                resp.raise_for_status()
-                status = resp.json()
-            except requests.RequestException as exc:
-                log_timing(f"MONITOR: Status check failed - {exc}")
-                time.sleep(poll_interval)
-                continue
+        url = (
+            f"{self.base_url.replace('/v1', '')}"
+            f"/v1/governance-tags/resources/import/status/{upload_id}"
+        )
 
-            import_status = status.get("status", "").lower()
-            log_timing(f"MONITOR: Import {import_id} status: {import_status} ({elapsed:.0f}s)")
+        with httpx.Client(timeout=30.0) as client:
+            while True:
+                response = client.get(url, headers=headers)
 
-            if import_status in ("completed", "complete", "success"):
-                return status
+                if response.status_code != 200:
+                    raise Exception(
+                        f"Failed to get import status: {response.status_code}"
+                    )
 
-            if import_status in ("failed", "error"):
-                return status
+                status = response.json()
+                yield status
 
-            time.sleep(poll_interval)
+                state = status.get("state", "")
+                if state in ("COMPLETED", "FAILED", "CANCELLED"):
+                    break
+
+                time.sleep(5)
 
     # ------------------------------------------------------------------
     # Date Utilities
     # ------------------------------------------------------------------
 
     @staticmethod
-    def get_week_date_range(reference_date: Optional[str] = None) -> tuple:
+    def get_week_date_range(week_number: int, year: int) -> Tuple[str, str]:
         """
-        Get the start and end dates for the week containing the reference date.
+        Get the Monday date for a specific ISO week number.
 
-        Weeks run Monday to Sunday. If no reference_date is given, uses
-        the current date.
+        For weekly granularity API calls, we send the same date for start and end.
+        The API returns data for the entire week containing that date.
 
-        Parameters
-        ----------
-        reference_date : str, optional
-            A date string in YYYY-MM-DD format.
-
-        Returns
-        -------
-        tuple of (str, str)
-            (week_start, week_end) in YYYY-MM-DD format.
+        Returns:
+            Tuple of (start_date, end_date) as YYYY-MM-DD strings.
         """
-        if reference_date:
-            dt = datetime.strptime(reference_date, "%Y-%m-%d")
-        else:
-            dt = datetime.now()
+        import datetime as dt
 
-        # Monday = 0 in weekday()
-        week_start = dt - timedelta(days=dt.weekday())
-        week_end = week_start + timedelta(days=6)
-
-        return week_start.strftime("%Y-%m-%d"), week_end.strftime("%Y-%m-%d")
+        week_date = dt.date.fromisocalendar(year, week_number, 1)  # Monday
+        date_str = week_date.strftime("%Y-%m-%d")
+        return date_str, date_str
 
 
 # Global instance
