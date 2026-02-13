@@ -219,13 +219,88 @@ Tag keys in Umbrella are **case-sensitive**. If the tag in Umbrella is `Environm
 
 ---
 
+## CLI Reference
+
+VTagger includes a CLI for running syncs, managing dimensions, and managing credentials without the web UI.
+
+### Sync
+
+```bash
+vtagger sync [OPTIONS]
+```
+
+Downloads assets from Umbrella, applies dimension mappings, and uploads virtual tags. Defaults to the current ISO week if no options are given.
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--week` | `-w` | Week number (1-53). Defaults to current week |
+| `--year` | `-y` | Year. Defaults to current year |
+| `--from-month` | | Start month (1-12) for multi-month sync |
+| `--from-year` | | Start year (defaults to current year) |
+| `--to-month` | | End month (1-12) for multi-month sync |
+| `--to-year` | | End year (defaults to current year) |
+| `--dry-run` | | Simulate only -- fetch and map without uploading |
+| `--filter-mode` | | `not_vtagged` (default) or `all` |
+| `--vtag-filter` | | Filter to specific dimension names (repeatable) |
+
+**Examples:**
+
+```bash
+# Sync current week (most common daily usage)
+vtagger sync
+
+# Sync a specific week
+vtagger sync --week 5 --year 2026
+
+# Dry run -- see match results without uploading
+vtagger sync --dry-run
+
+# Sync a range of months (e.g., backfill Nov 2025 through Feb 2026)
+vtagger sync --from-month 11 --from-year 2025 --to-month 2 --to-year 2026
+
+# Sync only specific dimensions
+vtagger sync --vtag-filter environment --vtag-filter cost_center
+
+# Sync all assets (including already-vtagged ones)
+vtagger sync --filter-mode all
+```
+
+### Dimensions
+
+```bash
+vtagger dimensions list                # List all loaded dimensions
+vtagger dimensions validate file.json  # Validate a dimension JSON file
+vtagger dimensions import file.json    # Import dimensions (--replace to overwrite)
+vtagger dimensions export output.json  # Export dimensions to file
+vtagger dimensions resolve '{"Environment": "prod", "Team": "backend"}'
+```
+
+### Credentials
+
+```bash
+vtagger credentials set       # Store Umbrella username/password
+vtagger credentials verify    # Test authentication
+vtagger credentials status    # Check if credentials are configured
+vtagger credentials delete    # Remove stored credentials
+```
+
+### Other Commands
+
+```bash
+vtagger info                  # Show configuration and status
+vtagger serve                 # Start the API server
+vtagger --version             # Show version
+```
+
+---
+
 ## Daily Sync (Cron Job)
 
 The cron container runs a daily sync that:
 
-1. Fetches the current week's cloud assets from all accounts
-2. Applies dimension mappings to generate vtags
-3. Uploads vtags to Umbrella (grouped by payer account)
+1. Determines the current ISO week number and year
+2. Calls the backend API to start a week sync
+3. Polls until sync completes (2-hour timeout)
 4. Runs a soft cleanup of old output files
 
 ### Customize Schedule
@@ -236,39 +311,46 @@ In `.env`:
 SYNC_CRON_SCHEDULE=0 3 * * 1-5
 ```
 
-### Manual Sync
+### Manual Sync (CLI)
 
-Via the web UI (Tools page), or via API:
+The simplest way to run a manual sync:
+
+```bash
+# Sync current week
+vtagger sync
+
+# Dry run first, then sync
+vtagger sync --dry-run
+vtagger sync
+
+# Backfill a month range
+vtagger sync --from-month 1 --to-month 3 --year 2026
+```
+
+### Manual Sync (API)
+
+You can also trigger syncs via the web UI (Tools page) or the REST API:
 
 ```bash
 # Sync a specific week
 curl -X POST http://localhost:8888/status/sync/week \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: YOUR_KEY" \
   -d '{"week_number": 2, "year": 2026}'
 
 # Sync a full month
 curl -X POST http://localhost:8888/status/sync/month \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: YOUR_KEY" \
   -d '{"account_key": "0", "month": "2026-01"}'
 
 # Sync a date range
 curl -X POST http://localhost:8888/status/sync/range \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: YOUR_KEY" \
   -d '{"account_key": "0", "start_date": "2026-01-01", "end_date": "2026-03-31"}'
-```
 
-### Sync for Specific Accounts
-
-Pass `account_keys` to sync only selected payer accounts:
-
-```bash
+# Sync only specific payer accounts
 curl -X POST http://localhost:8888/status/sync/week \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: YOUR_KEY" \
-  -d '{"account_key": "0", "start_date": "2026-01-06", "end_date": "2026-01-12", "account_keys": ["12345", "67890"]}'
+  -d '{"week_number": 2, "year": 2026, "account_keys": ["12345", "67890"]}'
 ```
 
 ---
@@ -276,7 +358,7 @@ curl -X POST http://localhost:8888/status/sync/week \
 ## Monitoring
 
 The Monitor page shows:
-- **Live agent status** with progress bar (SSE + polling)
+- **Live agent status** with progress during sync (polling every 2s)
 - **Upload history** with per-upload details:
   - Sync type (week/month/range) and date range
   - Payer account
