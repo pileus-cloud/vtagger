@@ -4,7 +4,7 @@ Virtual Tag management system for [Umbrella Cost](https://umbrellacost.io). Auto
 
 ## How It Works
 
-1. **Define Dimensions** -- Create tag mapping rules using a simple DSL (e.g., `TAG['Team'] == 'sre'` maps to vtag value `platform`)
+1. **Define Dimensions** -- Create tag mapping rules using a simple DSL (e.g., `TAG['Environment'] == 'production'` maps to vtag value `prod`)
 2. **Simulate** -- Test your mappings against live cloud data without making changes
 3. **Sync & Upload** -- Fetch assets from Umbrella, apply dimension mappings, and upload vtags back via the governance API
 4. **Monitor** -- Track upload status, view match rates, and see operation counts (inserted/updated/deleted)
@@ -150,23 +150,27 @@ Dimensions define how cloud resource tags map to virtual tags. Each dimension ha
 - **statements**: Ordered list of match rules
 - **defaultValue**: Value when no rule matches
 
-### Example: Team Dimension
+### Example: Environment Dimension
 
 ```json
 {
-  "vtag_name": "team",
+  "vtag_name": "environment",
   "index": 1,
   "kind": "tag",
-  "defaultValue": "No team",
-  "source": "TAG:Team",
+  "defaultValue": "Unallocated",
+  "source": "TAG:Environment",
   "statements": [
     {
-      "matchExpression": "TAG['Team'] == 'sre' || TAG['Team'] == 'platform'",
-      "valueExpression": "'platform'"
+      "matchExpression": "TAG['Environment'] == 'production' || TAG['Environment'] == 'prod'",
+      "valueExpression": "'production'"
     },
     {
-      "matchExpression": "TAG['Team'] == 'data-science' || TAG['Team'] == 'ai-mlp'",
-      "valueExpression": "'ai'"
+      "matchExpression": "TAG['Environment'] CONTAINS 'stag' || TAG['Environment'] == 'uat'",
+      "valueExpression": "'staging'"
+    },
+    {
+      "matchExpression": "TAG['Environment'] == 'dev' || TAG['Environment'] == 'development'",
+      "valueExpression": "'development'"
     }
   ]
 }
@@ -196,22 +200,22 @@ Dimensions can be imported and exported as JSON files via the web UI (Dimensions
 curl -X POST http://localhost:8888/dimensions/ \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_KEY" \
-  -d @team_dimension.json
+  -d @environment_dimension.json
 
 # Update existing dimension
-curl -X PUT http://localhost:8888/dimensions/team \
+curl -X PUT http://localhost:8888/dimensions/environment \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_KEY" \
-  -d @team_dimension.json
+  -d @environment_dimension.json
 
 # Export dimension
-curl http://localhost:8888/dimensions/team \
-  -H "X-API-Key: YOUR_KEY" > team_dimension.json
+curl http://localhost:8888/dimensions/environment \
+  -H "X-API-Key: YOUR_KEY" > environment_dimension.json
 ```
 
 ### Tag Key Case Sensitivity
 
-Tag keys in Umbrella are **case-sensitive**. If the tag in Umbrella is `Team`, the dimension must use `TAG['Team']` (not `TAG['team']`). Check the discovered tags in the UI after running a simulation to see the exact tag key names.
+Tag keys in Umbrella are **case-sensitive**. If the tag in Umbrella is `Environment`, the dimension must use `TAG['Environment']` (not `TAG['environment']`). Check the discovered tags in the UI after running a simulation to see the exact tag key names.
 
 ---
 
@@ -241,7 +245,7 @@ Via the web UI (Tools page), or via API:
 curl -X POST http://localhost:8888/status/sync/week \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_KEY" \
-  -d '{"account_key": "0", "start_date": "2026-01-06", "end_date": "2026-01-12"}'
+  -d '{"week_number": 2, "year": 2026}'
 
 # Sync a full month
 curl -X POST http://localhost:8888/status/sync/month \
@@ -264,7 +268,7 @@ Pass `account_keys` to sync only selected payer accounts:
 curl -X POST http://localhost:8888/status/sync/week \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_KEY" \
-  -d '{"account_key": "0", "start_date": "2026-01-06", "end_date": "2026-01-12", "account_keys": ["27659", "27660"]}'
+  -d '{"account_key": "0", "start_date": "2026-01-06", "end_date": "2026-01-12", "account_keys": ["12345", "67890"]}'
 ```
 
 ---
