@@ -502,7 +502,7 @@ def _run_cli_sync(sync_service, umbrella_client, mapping_engine,
         if dry_run:
             # Dry run: use simulation (fetch + map only, no upload)
             from app.services.simulation_service import simulation_service
-            result = simulation_service.run_simulation(
+            sim_result = simulation_service.run_simulation(
                 umbrella_client=umbrella_client,
                 mapping_engine=mapping_engine,
                 account_key="0",
@@ -511,6 +511,17 @@ def _run_cli_sync(sync_service, umbrella_client, mapping_engine,
                 vtag_filter_dimensions=vtag_filter_dims,
                 filter_mode=filter_mode,
             )
+            # SimulationResults is a dataclass, access attrs directly
+            click.echo(f"  Status: {sim_result.status}")
+            click.echo(f"  Total assets:  {sim_result.total_assets:,}")
+            click.echo(f"  Matched:       {sim_result.matched_assets:,}")
+            click.echo(f"  Unmatched:     {sim_result.unmatched_assets:,}")
+            click.echo(f"  Match rate:    {sim_result.match_rate:.1f}%")
+            if sim_result.output_file:
+                click.echo(f"  Output file:   {sim_result.output_file}")
+            if sim_result.error_message:
+                click.echo(f"  Error: {sim_result.error_message}", err=True)
+            click.echo("  (Dry run - no upload)")
         else:
             # Full sync: fetch + map + upload
             result = sync_service.run_week_sync(
@@ -523,23 +534,23 @@ def _run_cli_sync(sync_service, umbrella_client, mapping_engine,
                 filter_mode=filter_mode,
             )
 
-        status = result.get("status", "unknown")
-        click.echo(f"  Status: {status}")
+            status = result.get("status", "unknown")
+            click.echo(f"  Status: {status}")
 
-        stats = result.get("stats", {})
-        if stats:
-            click.echo(f"  Total assets:  {stats.get('total_assets', 0):,}")
-            click.echo(f"  Matched:       {stats.get('matched_assets', 0):,}")
-            click.echo(f"  Unmatched:     {stats.get('unmatched_assets', 0):,}")
+            stats = result.get("stats", {})
+            if stats:
+                click.echo(f"  Total assets:  {stats.get('total_assets', 0):,}")
+                click.echo(f"  Matched:       {stats.get('matched_assets', 0):,}")
+                click.echo(f"  Unmatched:     {stats.get('unmatched_assets', 0):,}")
 
-        uploads = result.get("uploads", [])
-        if uploads:
-            click.echo(f"  Uploads:       {len(uploads)}")
-            for u in uploads:
-                click.echo(f"    - {u.get('account_name', 'N/A')}: {u.get('upload_id', 'N/A')}")
+            uploads = result.get("uploads", [])
+            if uploads:
+                click.echo(f"  Uploads:       {len(uploads)}")
+                for u in uploads:
+                    click.echo(f"    - {u.get('account_name', 'N/A')}: {u.get('upload_id', 'N/A')}")
 
-        if result.get("error_message"):
-            click.echo(f"  Error: {result['error_message']}", err=True)
+            if result.get("error_message"):
+                click.echo(f"  Error: {result['error_message']}", err=True)
 
     except Exception as e:
         click.echo(f"  Error: {e}", err=True)
