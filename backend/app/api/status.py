@@ -56,13 +56,20 @@ class SimulationRequest(BaseModel):
 
 
 class WeekSyncRequest(BaseModel):
-    """Request to run a weekly sync."""
+    """Request to run a weekly sync.
+
+    Accepts either week_number+year OR start_date+end_date.
+    If week_number/year are provided, start_date/end_date are computed.
+    """
     account_key: str = "0"
     account_keys: Optional[List[str]] = None
-    start_date: str
-    end_date: str
+    week_number: Optional[int] = None
+    year: Optional[int] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     vtag_filter_dimensions: Optional[List[str]] = None
     filter_mode: str = "not_vtagged"  # "all" or "not_vtagged"
+    force_all: bool = False  # If true, overrides filter_mode to "all"
 
 
 class MonthSyncRequest(BaseModel):
@@ -325,8 +332,29 @@ async def start_week_sync(
     request: WeekSyncRequest,
     background_tasks: BackgroundTasks,
 ):
-    """Start a weekly sync operation."""
-    log_timing(f"[API] POST /sync/week: {request.start_date} to {request.end_date}, filter={request.filter_mode}")
+    """Start a weekly sync operation.
+
+    Accepts week_number+year OR start_date+end_date.
+    If force_all=true, overrides filter_mode to "all".
+    """
+    # Resolve dates from week_number/year if provided
+    start_date = request.start_date
+    end_date = request.end_date
+    filter_mode = "all" if request.force_all else request.filter_mode
+
+    if request.week_number is not None and request.year is not None:
+        from datetime import datetime as dt, timedelta
+        # ISO week: Jan 4 is always in week 1
+        jan4 = dt(request.year, 1, 4)
+        start_of_week1 = jan4 - timedelta(days=jan4.isoweekday() - 1)
+        monday = start_of_week1 + timedelta(weeks=request.week_number - 1)
+        sunday = monday + timedelta(days=6)
+        start_date = monday.strftime("%Y-%m-%d")
+        end_date = sunday.strftime("%Y-%m-%d")
+    elif not start_date or not end_date:
+        raise HTTPException(status_code=400, detail="Provide week_number+year or start_date+end_date.")
+
+    log_timing(f"[API] POST /sync/week: {start_date} to {end_date}, filter={filter_mode}")
 
     if sync_service._engine or sync_service._starting:
         raise HTTPException(status_code=409, detail="A sync is already running.")
@@ -335,17 +363,15 @@ async def start_week_sync(
     effective_keys = request.account_keys
 
     # Mark starting immediately so progress shows right away
-    sync_service.mark_starting("week", request.start_date, request.end_date)
+    sync_service.mark_starting("week", start_date, end_date)
 
     def run_sync():
         try:
-            # Check if cancelled during startup
             if sync_service._cancelled:
                 log_timing("[API] Week sync cancelled before auth")
                 sync_service._starting = False
                 return
 
-            # Auth and dimension loading happens in background (not blocking event loop)
             umbrella_client._ensure_authenticated()
 
             if sync_service._cancelled:
@@ -363,16 +389,16 @@ async def start_week_sync(
                 mapping_engine=mapping_engine,
                 account_key=effective_key,
                 account_keys=effective_keys,
-                start_date=request.start_date,
-                end_date=request.end_date,
+                start_date=start_date,
+                end_date=end_date,
                 vtag_filter_dimensions=request.vtag_filter_dimensions,
-                filter_mode=request.filter_mode,
+                filter_mode=filter_mode,
             )
         except Exception as e:
             log_timing(f"Week sync error: {e}")
             sync_service._starting = False
             sync_service._last_result = {"status": "error", "error_message": str(e),
-                "sync_type": "week", "start_date": request.start_date, "end_date": request.end_date,
+                "sync_type": "week", "start_date": start_date, "end_date": end_date,
                 "total_assets": 0, "matched_assets": 0, "unmatched_assets": 0, "elapsed_seconds": 0}
             sync_service._save_last_result()
             sync_service._engine = None
@@ -381,9 +407,11 @@ async def start_week_sync(
 
     return {
         "status": "started",
-        "message": "Week sync started.",
-        "start_date": request.start_date,
-        "end_date": request.end_date,
+        "message": f"Week sync started.",
+        "week_number": request.week_number,
+        "year": request.year,
+        "start_date": start_date,
+        "end_date": end_date,
     }
 
 

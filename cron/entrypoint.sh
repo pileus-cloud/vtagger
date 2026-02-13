@@ -1,21 +1,18 @@
 #!/bin/bash
 set -e
 
-SYNC_SCHEDULE="${SYNC_CRON_SCHEDULE:-0 2 * * *}"
+SCHEDULE="${SYNC_CRON_SCHEDULE:-0 2 * * *}"
 
-echo "[VTagger Cron] Starting with schedule: ${SYNC_SCHEDULE}"
-echo "[VTagger Cron] Backend URL: ${BACKEND_URL:-http://backend:8888}"
-echo "[VTagger Cron] Cleanup retention: ${CLEANUP_RETENTION_DAYS:-30} days"
+echo "Starting VTagger cron with schedule: $SCHEDULE"
+echo "Backend URL: ${BACKEND_URL:-http://backend:8888}"
+echo "Cleanup retention: ${CLEANUP_RETENTION_DAYS:-30} days"
 
-# Pass environment variables to cron
-env > /etc/environment
+# Write cron schedule from env var
+echo "$SCHEDULE /app/sync-and-cleanup.sh >> /var/log/cron.log 2>&1" > /etc/crontabs/root
 
-# Write crontab
-echo "${SYNC_SCHEDULE} /app/sync-and-cleanup.sh >> /var/log/vtagger-cron.log 2>&1" > /etc/crontabs/root
+# Ensure log file exists
+touch /var/log/cron.log
 
-# Create log file
-touch /var/log/vtagger-cron.log
-
-# Start crond in foreground
-echo "[VTagger Cron] Cron daemon starting..."
-crond -f -l 2
+# Start cron in foreground, tail log so docker logs work
+crond -f -l 2 &
+exec tail -f /var/log/cron.log
