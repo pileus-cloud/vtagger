@@ -190,6 +190,34 @@ async def check_key_exists():
     return APIKeyInfo(exists=False)
 
 
+@router.get("/accounts")
+async def get_accounts():
+    """Get the list of cloud accounts from Umbrella."""
+    from app.services.umbrella_client import umbrella_client
+
+    try:
+        umbrella_client._ensure_authenticated()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    aggregate_accounts, individual_accounts = umbrella_client.get_accounts()
+
+    # Cloud type mapping
+    cloud_types = {0: "AWS", 1: "Azure", 2: "GCP", 3: "K8S"}
+
+    accounts = []
+    for acc in individual_accounts:
+        accounts.append({
+            "accountKey": acc.get("accountKey"),
+            "accountId": acc.get("accountId", ""),
+            "accountName": acc.get("accountName", ""),
+            "cloudType": cloud_types.get(acc.get("cloudTypeId", 0), "Unknown"),
+            "cloudTypeId": acc.get("cloudTypeId", 0),
+        })
+
+    return {"accounts": accounts, "count": len(accounts)}
+
+
 @router.delete("/keys/{key_name}")
 async def delete_api_key(
     key_name: str,

@@ -76,8 +76,8 @@ def validate_dimension_json(content: Dict) -> List[str]:
     """Validate a dimension JSON blob. Returns list of error messages (empty = valid)."""
     errors = []
 
-    if not content.get("vtag_name") and not content.get("name"):
-        errors.append("Missing required field: vtag_name or name")
+    if not content.get("vtag_name") and not content.get("name") and not content.get("vtagName"):
+        errors.append("Missing required field: vtag_name or vtagName or name")
 
     statements = content.get("statements", [])
     if not isinstance(statements, list):

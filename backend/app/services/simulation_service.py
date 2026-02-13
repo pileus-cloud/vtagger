@@ -31,6 +31,7 @@ class SimulationResults:
     dimension_matches: int = 0
     match_rate: float = 0.0
     vtag_names: List[str] = field(default_factory=list)
+    tag_keys: List[str] = field(default_factory=list)
     dimension_details: Dict[str, int] = field(default_factory=dict)
     sample_records: List[Dict] = field(default_factory=list)
     elapsed_seconds: float = 0.0
@@ -49,6 +50,7 @@ class SimulationResults:
             "dimension_matches": self.dimension_matches,
             "match_rate": self.match_rate,
             "vtag_names": self.vtag_names,
+            "tag_keys": self.tag_keys,
             "dimension_details": self.dimension_details,
             "sample_records": self.sample_records[:50],
             "elapsed_seconds": round(self.elapsed_seconds, 2),
@@ -81,9 +83,19 @@ class SimulationService:
         return {"status": "idle"}
 
     def get_results(self) -> Optional[dict]:
-        """Get the results of the last simulation."""
+        """Get the results of the last simulation, with live progress if still running."""
         if self._results:
-            return self._results.to_dict()
+            result = self._results.to_dict()
+            # Inject live progress from engine while still running
+            if self._engine and result.get("status") == "running":
+                progress = self._engine.get_progress()
+                result["total_assets"] = progress.get("processed_assets", 0)
+                result["matched_assets"] = progress.get("matched_assets", 0)
+                result["unmatched_assets"] = progress.get("unmatched_assets", 0)
+                result["dimension_matches"] = progress.get("dimension_matches", 0)
+                result["elapsed_seconds"] = progress.get("elapsed_seconds", 0)
+                result["phase"] = progress.get("phase", "")
+            return result
         return None
 
     def run_simulation(
@@ -95,6 +107,8 @@ class SimulationService:
         end_date: str,
         progress_callback: Optional[Callable] = None,
         vtag_filter_dimensions: Optional[List[str]] = None,
+        max_records: int = 0,
+        filter_mode: str = "all",
     ) -> SimulationResults:
         """
         Run a simulation/dry-run tagging.
@@ -127,15 +141,32 @@ class SimulationService:
         start_time = time.time()
 
         try:
+            # Resolve account keys from Umbrella API
+            account_keys = []
+            if account_key == "0" or not account_key:
+                aggregate_accounts, individual_accounts = umbrella_client.get_accounts()
+                all_accounts = aggregate_accounts + individual_accounts
+                if not all_accounts:
+                    raise Exception("No accounts found.")
+                account_keys = [
+                    acc.get("accountKey") for acc in all_accounts
+                    if acc.get("accountKey")
+                ]
+                log_timing(f"Resolved {len(account_keys)} account keys")
+            else:
+                account_keys = [account_key]
+
             output_file, stats = engine.fetch_and_map(
                 umbrella_client=umbrella_client,
                 mapping_engine=mapping_engine,
-                account_key=account_key,
+                account_keys=account_keys,
                 start_date=start_date,
                 end_date=end_date,
                 output_dir=settings.output_dir,
                 progress_callback=progress_callback,
                 vtag_filter_dimensions=vtag_filter_dimensions,
+                max_records=max_records,
+                filter_mode=filter_mode,
             )
 
             elapsed = time.time() - start_time
@@ -161,6 +192,9 @@ class SimulationService:
                 results.vtag_names = [
                     d for d in results.vtag_names if d in vtag_filter_dimensions
                 ]
+
+            # Get tag keys used by dimensions (for display in results table)
+            results.tag_keys = sorted(mapping_engine.get_required_tag_keys())
 
             log_timing(
                 f"Simulation complete: {results.total_assets} assets, "

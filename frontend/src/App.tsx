@@ -88,7 +88,7 @@ function App() {
   const createKeyMutation = useMutation({
     mutationFn: () => api.createKey('web-client'),
     onSuccess: (data) => {
-      setGeneratedKey(data.api_key)
+      setGeneratedKey(data.key)
       setKeyExists(true)
       setError(null)
     },

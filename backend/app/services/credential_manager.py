@@ -2,9 +2,9 @@
 VTagger Credential Manager.
 
 Manages secure storage and retrieval of API credentials.
-Supports multiple backends: environment variables, config file, keyring, fallback key derivation.
+Storage backends: environment variables or encrypted config file.
 
-Encryption: Fernet symmetric encryption with master key hierarchy.
+Encryption: Fernet symmetric encryption (AES-128-CBC) with master key.
 """
 
 import base64
@@ -14,41 +14,13 @@ import os
 import platform
 import getpass
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple
 
-try:
-    from cryptography.fernet import Fernet
-    HAS_CRYPTOGRAPHY = True
-except ImportError:
-    HAS_CRYPTOGRAPHY = False
-
-try:
-    import keyring
-    HAS_KEYRING = True
-except ImportError:
-    HAS_KEYRING = False
+from cryptography.fernet import Fernet
 
 SERVICE_NAME = "vtagger"
 CONFIG_DIR = Path.home() / ".vtagger"
 CONFIG_FILE = CONFIG_DIR / "credentials.json"
-XOR_KEY = "vtagger_secret_key_2024"
-
-
-def _xor_encrypt(data: str, key: str) -> str:
-    """Simple XOR encryption for basic obfuscation."""
-    result = []
-    for i, ch in enumerate(data):
-        result.append(chr(ord(ch) ^ ord(key[i % len(key)])))
-    return base64.b64encode("".join(result).encode("latin-1")).decode("ascii")
-
-
-def _xor_decrypt(data: str, key: str) -> str:
-    """Simple XOR decryption."""
-    decoded = base64.b64decode(data).decode("latin-1")
-    result = []
-    for i, ch in enumerate(decoded):
-        result.append(chr(ord(ch) ^ ord(key[i % len(key)])))
-    return "".join(result)
 
 
 def _derive_key(master_key: str) -> bytes:
@@ -66,7 +38,7 @@ def _get_machine_key() -> str:
 
 
 def _get_master_key() -> str:
-    """Get master key from hierarchy: env var > config > machine-derived fallback."""
+    """Get master key from hierarchy: env var > config file > machine-derived fallback."""
     # 1. Environment variable
     env_key = os.environ.get("VTAGGER_MASTER_KEY")
     if env_key:
@@ -86,51 +58,22 @@ def _get_master_key() -> str:
 
 
 def _encrypt_value(value: str, master_key: str) -> str:
-    """Encrypt a value using Fernet if available, otherwise XOR."""
-    if HAS_CRYPTOGRAPHY:
-        key = _derive_key(master_key)
-        f = Fernet(key)
-        return f.encrypt(value.encode()).decode("ascii")
-    else:
-        return _xor_encrypt(value, XOR_KEY)
+    """Encrypt a value using Fernet."""
+    key = _derive_key(master_key)
+    f = Fernet(key)
+    return f.encrypt(value.encode()).decode("ascii")
 
 
 def _decrypt_value(encrypted: str, master_key: str) -> str:
-    """Decrypt a value using Fernet if available, otherwise XOR."""
-    if HAS_CRYPTOGRAPHY:
-        key = _derive_key(master_key)
-        f = Fernet(key)
-        return f.decrypt(encrypted.encode()).decode("utf-8")
-    else:
-        return _xor_decrypt(encrypted, XOR_KEY)
-
-
-def _use_keyring() -> bool:
-    """Check if keyring backend should be used."""
-    env_val = os.environ.get("VTAGGER_USE_KEYRING", "").lower()
-    if env_val in ("0", "false", "no"):
-        return False
-    return HAS_KEYRING
+    """Decrypt a value using Fernet."""
+    key = _derive_key(master_key)
+    f = Fernet(key)
+    return f.decrypt(encrypted.encode()).decode("utf-8")
 
 
 def set_credentials(username: str, password: str) -> bool:
-    """Store credentials securely.
-
-    Storage hierarchy:
-    1. Keyring (if available and not disabled)
-    2. Encrypted config file (~/.vtagger/credentials.json)
-    """
+    """Store credentials in encrypted config file (~/.vtagger/credentials.json)."""
     try:
-        # Try keyring first
-        if _use_keyring():
-            try:
-                keyring.set_password(SERVICE_NAME, "username", username)
-                keyring.set_password(SERVICE_NAME, "password", password)
-                return True
-            except Exception:
-                pass  # Fall through to config file
-
-        # Fall back to encrypted config file
         master_key = _get_master_key()
         encrypted_username = _encrypt_value(username, master_key)
         encrypted_password = _encrypt_value(password, master_key)
@@ -149,12 +92,7 @@ def set_credentials(username: str, password: str) -> bool:
         config["encrypted"] = True
 
         CONFIG_FILE.write_text(json.dumps(config, indent=2))
-
-        # Set restrictive permissions
-        try:
-            CONFIG_FILE.chmod(0o600)
-        except OSError:
-            pass
+        CONFIG_FILE.chmod(0o600)
 
         return True
 
@@ -168,8 +106,7 @@ def get_credentials() -> Optional[Tuple[str, str]]:
 
     Retrieval hierarchy:
     1. Environment variables (VTAGGER_USERNAME, VTAGGER_PASSWORD)
-    2. Keyring
-    3. Encrypted config file
+    2. Encrypted config file (~/.vtagger/credentials.json)
 
     Returns:
         Tuple of (username, password) or None if not found.
@@ -180,17 +117,7 @@ def get_credentials() -> Optional[Tuple[str, str]]:
     if env_user and env_pass:
         return (env_user, env_pass)
 
-    # 2. Keyring
-    if _use_keyring():
-        try:
-            kr_user = keyring.get_password(SERVICE_NAME, "username")
-            kr_pass = keyring.get_password(SERVICE_NAME, "password")
-            if kr_user and kr_pass:
-                return (kr_user, kr_pass)
-        except Exception:
-            pass
-
-    # 3. Encrypted config file
+    # 2. Encrypted config file
     if CONFIG_FILE.exists():
         try:
             config = json.loads(CONFIG_FILE.read_text())
@@ -213,21 +140,9 @@ def get_credentials() -> Optional[Tuple[str, str]]:
 
 def has_credentials() -> bool:
     """Check if credentials are configured (without decrypting)."""
-    # Check env vars
     if os.environ.get("VTAGGER_USERNAME") and os.environ.get("VTAGGER_PASSWORD"):
         return True
 
-    # Check keyring
-    if _use_keyring():
-        try:
-            kr_user = keyring.get_password(SERVICE_NAME, "username")
-            kr_pass = keyring.get_password(SERVICE_NAME, "password")
-            if kr_user and kr_pass:
-                return True
-        except Exception:
-            pass
-
-    # Check config file
     if CONFIG_FILE.exists():
         try:
             config = json.loads(CONFIG_FILE.read_text())
@@ -257,30 +172,17 @@ def verify_credentials() -> Tuple[bool, str]:
     if not username or not password:
         return (False, "Credentials are empty. Run 'vtagger credentials set' to configure.")
 
-    # Mask password for display
     masked = password[:2] + "*" * (len(password) - 4) + password[-2:] if len(password) > 4 else "****"
     return (True, f"Credentials OK (user: {username}, pass: {masked})")
 
 
 def delete_credentials() -> bool:
-    """Delete stored credentials from all backends."""
-    deleted = False
-
-    # Delete from keyring
-    if _use_keyring():
-        try:
-            keyring.delete_password(SERVICE_NAME, "username")
-            keyring.delete_password(SERVICE_NAME, "password")
-            deleted = True
-        except Exception:
-            pass
-
-    # Delete config file
+    """Delete stored credentials."""
     if CONFIG_FILE.exists():
         try:
             CONFIG_FILE.unlink()
-            deleted = True
+            return True
         except OSError:
             pass
 
-    return deleted
+    return False

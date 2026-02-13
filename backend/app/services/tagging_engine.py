@@ -140,31 +140,43 @@ class TaggingEngine:
         self,
         umbrella_client,
         mapping_engine,
-        account_key: str,
-        start_date: str,
-        end_date: str,
-        output_dir: str,
+        account_keys: Optional[List[str]] = None,
+        start_date: str = "",
+        end_date: str = "",
+        output_dir: str = "",
         progress_callback: Optional[Callable] = None,
         vtag_filter_dimensions: Optional[List[str]] = None,
+        max_records: int = 0,
+        filter_mode: str = "all",
+        # Legacy support: single account_key -> list
+        account_key: Optional[str] = None,
     ) -> Tuple[str, MappingStats]:
         """
         Fetch assets from Umbrella, apply dimension mappings, and write JSONL output.
 
-        Uses streaming pagination to process large datasets efficiently.
+        Iterates over all account keys and streams assets from each.
 
         Args:
             umbrella_client: UmbrellaClient instance.
             mapping_engine: MappingEngine with loaded dimension mappings.
-            account_key: Umbrella account key.
+            account_keys: List of Umbrella account keys to fetch from.
             start_date: Start date (YYYY-MM-DD).
             end_date: End date (YYYY-MM-DD).
             output_dir: Directory for output files.
             progress_callback: Optional callback for progress updates.
             vtag_filter_dimensions: Optional list of dimension names to filter.
+            account_key: Deprecated single key (converted to list).
 
         Returns:
             Tuple of (output_file_path, mapping_stats).
         """
+        # Legacy support: single account_key -> list
+        if not account_keys:
+            if account_key:
+                account_keys = [account_key]
+            else:
+                raise ValueError("Either account_keys or account_key must be provided")
+
         self.reset()
         self.progress.status = "running"
         self.progress.phase = "initializing"
@@ -181,11 +193,29 @@ class TaggingEngine:
         output_file = os.path.join(output_dir, f"tagged_{date_suffix}.jsonl")
         csv_file = os.path.join(output_dir, f"tagged_{date_suffix}.csv")
 
-        log_timing(f"Starting tagging: {start_date} to {end_date}, account={account_key}")
+        if max_records > 0:
+            log_timing(
+                f"Starting tagging: {start_date} to {end_date}, "
+                f"{len(account_keys)} accounts, max {max_records} records"
+            )
+        else:
+            log_timing(
+                f"Starting tagging: {start_date} to {end_date}, "
+                f"{len(account_keys)} accounts"
+            )
 
         # Get required tag keys from mapping engine
         tag_keys = mapping_engine.get_required_tag_keys()
         log_timing(f"Required tag keys: {tag_keys}")
+
+        # Build tag column map: customTagValue_N -> tag name
+        # The v2 API returns custom tag columns as customTagValue_4,
+        # customTagValue_5, etc. (starting at index 4).
+        sorted_tag_keys = sorted(tag_keys)
+        tag_column_map = {}
+        for i, key in enumerate(sorted_tag_keys):
+            tag_column_map[f"customTagValue_{i + 4}"] = key
+        log_timing(f"Tag column map: {tag_column_map}")
 
         # Determine which dimensions to process
         if vtag_filter_dimensions:
@@ -203,108 +233,132 @@ class TaggingEngine:
             with open(output_file, "w") as jsonl_out:
                 page_num = 0
 
-                # Stream assets from Umbrella with pagination
-                for page_assets in umbrella_client.fetch_assets_stream(
-                    account_key=account_key,
-                    start_date=start_date,
-                    end_date=end_date,
-                    tag_keys=tag_keys,
-                    vtag_filter_dimensions=vtag_filter_dimensions,
-                ):
+                # Iterate over all account keys
+                for acct_idx, acct_key in enumerate(account_keys):
                     if self._cancel_requested:
-                        log_timing("Cancelled during fetch")
-                        self.progress.status = "cancelled"
+                        break
+                    if max_records > 0 and stats.total_assets >= max_records:
                         break
 
-                    page_num += 1
-                    self.progress.current_page = page_num
-                    self.progress.phase = f"processing page {page_num}"
-
+                    self.progress.phase = (
+                        f"account {acct_idx + 1}/{len(account_keys)}"
+                    )
                     log_timing(
-                        f"Processing page {page_num}: "
-                        f"{len(page_assets)} assets"
+                        f"Fetching account {acct_idx + 1}/{len(account_keys)}: "
+                        f"key={acct_key}"
                     )
 
-                    for asset in page_assets:
-                        if self._cancel_requested:
-                            break
+                    # Stream assets from Umbrella with pagination
+                    try:
+                        for page_assets in umbrella_client.fetch_assets_stream(
+                            account_key=acct_key,
+                            start_date=start_date,
+                            end_date=end_date,
+                            tag_keys=tag_keys,
+                            vtag_filter_dimensions=vtag_filter_dimensions,
+                            filter_mode=filter_mode,
+                        ):
+                            if self._cancel_requested:
+                                log_timing("Cancelled during fetch")
+                                self.progress.status = "cancelled"
+                                break
+                            if max_records > 0 and stats.total_assets >= max_records:
+                                log_timing(f"Reached max_records limit ({max_records})")
+                                break
 
-                        stats.total_assets += 1
-                        self.progress.processed_assets += 1
+                            page_num += 1
+                            self.progress.current_page = page_num
+                            self.progress.phase = (
+                                f"account {acct_idx + 1}/{len(account_keys)}, "
+                                f"page {page_num}"
+                            )
 
-                        # Use mapping_engine.map_resource for full mapping
-                        mapped = mapping_engine.map_resource(asset)
-                        all_dimensions = mapped.get("dimensions", {})
+                            for asset in page_assets:
+                                if self._cancel_requested:
+                                    break
+                                if max_records > 0 and stats.total_assets >= max_records:
+                                    break
 
-                        # Filter to active dimensions if needed
-                        if vtag_filter_dimensions:
-                            dimensions = {
-                                k: v for k, v in all_dimensions.items()
-                                if k in vtag_filter_dimensions
-                            }
-                        else:
-                            dimensions = all_dimensions
+                                stats.total_assets += 1
+                                self.progress.processed_assets += 1
 
-                        # Check for matches per dimension
-                        any_match = False
-                        for dim in active_dims:
-                            dim_value = dimensions.get(dim.vtag_name, dim.default_value)
-                            if dim_value != dim.default_value:
-                                any_match = True
-                                stats.record_match(dim.vtag_name)
+                                # Use mapping_engine.map_resource for full mapping
+                                mapped = mapping_engine.map_resource(asset, tag_column_map=tag_column_map)
+                                all_dimensions = mapped.get("dimensions", {})
 
-                        if any_match:
-                            stats.matched_assets += 1
-                            self.progress.matched_assets += 1
-                        else:
-                            stats.unmatched_assets += 1
-                            self.progress.unmatched_assets += 1
+                                # Filter to active dimensions if needed
+                                if vtag_filter_dimensions:
+                                    dimensions = {
+                                        k: v for k, v in all_dimensions.items()
+                                        if k in vtag_filter_dimensions
+                                    }
+                                else:
+                                    dimensions = all_dimensions
 
-                        self.progress.dimension_matches = stats.dimension_count
+                                # Check for matches per dimension
+                                any_match = False
+                                for dim in active_dims:
+                                    dim_value = dimensions.get(dim.vtag_name, dim.default_value)
+                                    if dim_value != dim.default_value:
+                                        any_match = True
+                                        stats.record_match(dim.vtag_name)
 
-                        # Build output record
-                        record = {
-                            "resourceid": asset.get("resourceid", asset.get("resourceId", "")),
-                            "linkedaccid": asset.get(
-                                "linkedaccid",
-                                asset.get("linkedAccountId", asset.get("linkedaccountid", "")),
-                            ),
-                            "payeraccount": asset.get(
-                                "payeraccount",
-                                asset.get("payerAccountId", asset.get("payerAccount", "")),
-                            ),
-                            "dimensions": dimensions,
-                            "tags": _extract_tags(asset),
-                        }
+                                if any_match:
+                                    stats.matched_assets += 1
+                                    self.progress.matched_assets += 1
+                                else:
+                                    stats.unmatched_assets += 1
+                                    self.progress.unmatched_assets += 1
 
-                        # Write JSONL line
-                        jsonl_out.write(json.dumps(record) + "\n")
+                                self.progress.dimension_matches = stats.dimension_count
 
-                        # Reservoir sampling for preview
-                        if len(sample_reservoir) < self.SAMPLE_SIZE:
-                            sample_reservoir.append(record)
-                        else:
-                            idx = random.randint(0, stats.total_assets - 1)
-                            if idx < self.SAMPLE_SIZE:
-                                sample_reservoir[idx] = record
+                                # Only write matched records to JSONL
+                                if not any_match:
+                                    continue
 
-                    # Update elapsed time
-                    self.progress.elapsed_seconds = time.time() - self.progress.start_time
+                                # Build output record
+                                record = {
+                                    "resourceid": asset.get("resourceid", asset.get("resourceId", "")),
+                                    "linkedaccid": asset.get(
+                                        "linkedaccid",
+                                        asset.get("linkedAccountId", asset.get("linkedaccountid", "")),
+                                    ),
+                                    "payeraccount": asset.get(
+                                        "payeraccount",
+                                        asset.get("payerAccountId", asset.get("payerAccount", "")),
+                                    ),
+                                    "dimensions": dimensions,
+                                    "tags": _extract_tags(asset, tag_column_map),
+                                }
 
-                    # Estimate remaining time
-                    if self.progress.processed_assets > 0 and self.progress.total_assets > 0:
-                        rate = self.progress.processed_assets / self.progress.elapsed_seconds
-                        remaining = self.progress.total_assets - self.progress.processed_assets
-                        self.progress.estimated_remaining = remaining / rate if rate > 0 else 0
+                                # Write JSONL line
+                                jsonl_out.write(json.dumps(record) + "\n")
 
-                    # Update total_assets estimate from processed count
-                    self.progress.total_assets = max(
-                        self.progress.total_assets, self.progress.processed_assets
-                    )
+                                # Reservoir sampling for preview
+                                if len(sample_reservoir) < self.SAMPLE_SIZE:
+                                    sample_reservoir.append(record)
+                                else:
+                                    idx = random.randint(0, stats.total_assets - 1)
+                                    if idx < self.SAMPLE_SIZE:
+                                        sample_reservoir[idx] = record
 
-                    # Fire progress callback
-                    if progress_callback:
-                        progress_callback(self.progress)
+                            # Update elapsed time
+                            self.progress.elapsed_seconds = time.time() - self.progress.start_time
+
+                            # Update total_assets estimate from processed count
+                            self.progress.total_assets = max(
+                                self.progress.total_assets, self.progress.processed_assets
+                            )
+
+                            # Fire progress callback
+                            if progress_callback:
+                                progress_callback(self.progress)
+
+                    except Exception as acct_err:
+                        log_timing(
+                            f"Error fetching account {acct_key}: {acct_err}, skipping"
+                        )
+                        continue
 
             # Generate CSV from JSONL
             if not self._cancel_requested and os.path.exists(output_file):
@@ -395,11 +449,12 @@ class TaggingEngine:
         self,
         umbrella_client,
         mapping_engine,
-        account_key: str,
-        start_date: str,
-        end_date: str,
+        account_keys: Optional[List[str]] = None,
+        start_date: str = "",
+        end_date: str = "",
         progress_callback: Optional[Callable] = None,
         vtag_filter_dimensions: Optional[List[str]] = None,
+        account_key: Optional[str] = None,
     ) -> Tuple[str, MappingStats]:
         """
         Run a tagging sync for a date range.
@@ -407,20 +462,23 @@ class TaggingEngine:
         Args:
             umbrella_client: Client for Umbrella API.
             mapping_engine: Mapping engine with loaded dimensions.
-            account_key: Umbrella account key.
+            account_keys: List of Umbrella account keys.
             start_date: Start date (YYYY-MM-DD).
             end_date: End date (YYYY-MM-DD).
             progress_callback: Optional progress callback.
             vtag_filter_dimensions: Optional dimension filter.
+            account_key: Deprecated single key (converted to list).
 
         Returns:
             Tuple of (output_file_path, mapping_stats).
         """
+        if account_key and not account_keys:
+            account_keys = [account_key]
         output_dir = settings.output_dir
         return self.fetch_and_map(
             umbrella_client=umbrella_client,
             mapping_engine=mapping_engine,
-            account_key=account_key,
+            account_keys=account_keys,
             start_date=start_date,
             end_date=end_date,
             output_dir=output_dir,
@@ -433,7 +491,7 @@ class TaggingEngine:
         return self.progress.to_dict()
 
 
-def _extract_tags(asset: Dict) -> Dict[str, str]:
+def _extract_tags(asset: Dict, tag_column_map: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Extract tag key-value pairs from an asset record."""
     tags = {}
 
@@ -446,6 +504,13 @@ def _extract_tags(asset: Dict) -> Dict[str, str]:
                 value = tag.get("value", "")
                 if key and value and value != "no tag":
                     tags[key] = value
+
+    # From customTagValue_N columns (v2 API format)
+    if tag_column_map:
+        for col_name, tag_name in tag_column_map.items():
+            value = asset.get(col_name, "")
+            if value and value != "no tag":
+                tags[tag_name] = value
 
     # From Tag: prefix columns
     for col_key, col_value in asset.items():

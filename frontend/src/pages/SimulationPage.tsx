@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { Play, Search } from 'lucide-react'
+import { Play } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -20,7 +20,6 @@ export function SimulationPage() {
   const [year, setYear] = useState(new Date().getFullYear())
   const [filterMode, setFilterMode] = useState('all')
   const [maxRecords, setMaxRecords] = useState(1000)
-  const [resolveTags, setResolveTags] = useState('')
 
   const dimensionsQuery = useQuery({
     queryKey: ['dimensions'],
@@ -30,33 +29,19 @@ export function SimulationPage() {
   const resultsQuery = useQuery({
     queryKey: ['simulation-results'],
     queryFn: () => api.getSimulationResults(),
-    refetchInterval: 5000,
+    refetchInterval: (query) => {
+      const data = query.state.data
+      return data?.status === 'running' ? 2000 : 5000
+    },
   })
 
   const simulationMutation = useMutation({
     mutationFn: () => api.runSimulation(weekNumber, year, filterMode, maxRecords),
   })
 
-  const resolveMutation = useMutation({
-    mutationFn: (tags: Record<string, string>) => api.resolveTags(tags),
-  })
-
-  const results: SimulationResults | null = resultsQuery.data ?? null
-
-  const handleResolve = () => {
-    try {
-      const tags = JSON.parse(resolveTags)
-      resolveMutation.mutate(tags)
-    } catch {
-      // Try key=value format
-      const tags: Record<string, string> = {}
-      resolveTags.split('\n').forEach(line => {
-        const [key, ...rest] = line.split('=')
-        if (key && rest.length) tags[key.trim()] = rest.join('=').trim()
-      })
-      if (Object.keys(tags).length > 0) resolveMutation.mutate(tags)
-    }
-  }
+  const results: (SimulationResults & { phase?: string }) | null = resultsQuery.data ?? null
+  const isCompleted = results?.status === 'completed'
+  const isRunning = results?.status === 'running'
 
   return (
     <div className="space-y-6">
@@ -90,42 +75,78 @@ export function SimulationPage() {
               <label className="text-xs font-medium text-gray-500">Max Records</label>
               <Input type="number" value={maxRecords} onChange={(e) => setMaxRecords(Number(e.target.value))} className="w-28" />
             </div>
-            <Button onClick={() => simulationMutation.mutate()} disabled={simulationMutation.isPending}>
+            <Button onClick={() => simulationMutation.mutate()} disabled={simulationMutation.isPending || isRunning}>
               <Play className="h-4 w-4 mr-1" />
-              {simulationMutation.isPending ? 'Running...' : 'Run'}
+              {simulationMutation.isPending || isRunning ? 'Running...' : 'Run'}
             </Button>
           </div>
-          {dimensionsQuery.data && (dimensionsQuery.data as Array<{vtag_name: string}>).length > 0 && (
+          {dimensionsQuery.data && dimensionsQuery.data.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-1">
               <span className="text-xs text-gray-400">Loaded dimensions:</span>
-              {(dimensionsQuery.data as Array<{vtag_name: string}>).map((d) => (
+              {dimensionsQuery.data.map((d) => (
                 <Badge key={d.vtag_name} variant="secondary" className="text-xs">{d.vtag_name}</Badge>
               ))}
+            </div>
+          )}
+          {results?.error_message && (
+            <div className="mt-3 text-sm text-red-600">
+              Error: {results.error_message}
             </div>
           )}
         </CardContent>
       </Card>
 
-      {/* Results */}
-      {results && results.completed && (
+      {/* Live progress while running */}
+      {results && isRunning && (
+        <Card>
+          <CardContent className="py-4">
+            <div className="flex items-center gap-4">
+              <div className="h-2 flex-1 bg-gray-100 rounded-full overflow-hidden">
+                <div className="h-full bg-primary-500 rounded-full animate-pulse" style={{ width: '100%' }} />
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-4 gap-4 text-center">
+              <div>
+                <div className="text-lg font-semibold">{(results.total_assets || 0).toLocaleString()}</div>
+                <div className="text-xs text-gray-500">Assets Processed</div>
+              </div>
+              <div>
+                <div className="text-lg font-semibold">{(results.matched_assets || 0).toLocaleString()}</div>
+                <div className="text-xs text-gray-500">Matched</div>
+              </div>
+              <div>
+                <div className="text-lg font-semibold">{(results.unmatched_assets || 0).toLocaleString()}</div>
+                <div className="text-xs text-gray-500">Unmatched</div>
+              </div>
+              <div>
+                <div className="text-lg font-semibold">{Math.round(results.elapsed_seconds || 0)}s</div>
+                <div className="text-xs text-gray-500">Elapsed</div>
+              </div>
+            </div>
+            {results.phase && (
+              <div className="mt-2 text-xs text-gray-400 text-center">{results.phase}</div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Completed Results */}
+      {results && isCompleted && (
         <>
           <div className="grid grid-cols-4 gap-4">
-            <MetricCard title="Total Processed" value={results.total_processed.toLocaleString()} />
-            <MetricCard title="Dimension Matches" value={results.dimension_matches.toLocaleString()} />
-            <MetricCard title="Unallocated" value={results.unallocated.toLocaleString()} />
+            <MetricCard title="Total Assets" value={results.total_assets.toLocaleString()} />
+            <MetricCard title="Matched" value={results.matched_assets.toLocaleString()} />
+            <MetricCard title="Unmatched" value={results.unmatched_assets.toLocaleString()} />
             <MetricCard
               title="Match Rate"
-              value={results.total_processed > 0
-                ? `${((results.dimension_matches / results.total_processed) * 100).toFixed(1)}%`
-                : '0%'
-              }
-              subtitle={`${results.duration_seconds.toFixed(1)}s`}
+              value={`${results.match_rate.toFixed(1)}%`}
+              subtitle={`${results.elapsed_seconds}s`}
             />
           </div>
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Sample Results ({results.samples.length})</CardTitle>
+              <CardTitle className="text-base">Sample Results ({results.sample_records.length})</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="overflow-auto max-h-96">
@@ -135,13 +156,16 @@ export function SimulationPage() {
                       <TableHead>Status</TableHead>
                       <TableHead>Resource ID</TableHead>
                       <TableHead>Account</TableHead>
+                      {(results.tag_keys || []).map((key) => (
+                        <TableHead key={`tag-${key}`} className="text-blue-600">Tag: {key}</TableHead>
+                      ))}
                       {(results.vtag_names || []).map((name) => (
-                        <TableHead key={name}>{name}</TableHead>
+                        <TableHead key={name} className="text-emerald-600">{name}</TableHead>
                       ))}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {results.samples.map((sample, i) => {
+                    {results.sample_records.map((sample, i) => {
                       const hasMatch = Object.values(sample.dimensions || {}).some(v => v !== 'Unallocated')
                       return (
                         <TableRow key={i}>
@@ -150,11 +174,16 @@ export function SimulationPage() {
                               {hasMatch ? 'Matched' : 'Unallocated'}
                             </Badge>
                           </TableCell>
-                          <TableCell className="font-mono text-xs max-w-[200px] truncate">{sample.resource_id}</TableCell>
-                          <TableCell className="text-xs">{sample.account_id}</TableCell>
+                          <TableCell className="font-mono text-xs max-w-[200px] truncate">{sample.resourceid}</TableCell>
+                          <TableCell className="text-xs">{sample.linkedaccid}</TableCell>
+                          {(results.tag_keys || []).map((key) => (
+                            <TableCell key={`tag-${key}`} className="text-xs text-blue-700 font-mono">
+                              {sample.tags?.[key] || <span className="text-gray-300">-</span>}
+                            </TableCell>
+                          ))}
                           {(results.vtag_names || []).map((name) => (
                             <TableCell key={name} className="text-xs">
-                              <span className={sample.dimensions?.[name] === 'Unallocated' ? 'text-gray-400' : 'font-medium'}>
+                              <span className={sample.dimensions?.[name] === 'Unallocated' ? 'text-gray-400' : 'font-medium text-emerald-700'}>
                                 {sample.dimensions?.[name] || '-'}
                               </span>
                             </TableCell>
@@ -170,39 +199,6 @@ export function SimulationPage() {
         </>
       )}
 
-      {/* Tag Resolution */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">Resolve Tags</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <textarea
-            className="w-full h-24 p-3 font-mono text-xs border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-            value={resolveTags}
-            onChange={(e) => setResolveTags(e.target.value)}
-            placeholder='{"environment": "production", "team": "platform"}'
-          />
-          <div className="flex gap-2">
-            <Button size="sm" onClick={handleResolve} disabled={resolveMutation.isPending}>
-              <Search className="h-4 w-4 mr-1" /> Resolve
-            </Button>
-          </div>
-          {resolveMutation.data && (
-            <div className="p-3 bg-gray-50 rounded-lg">
-              <h4 className="text-sm font-medium mb-2">Results</h4>
-              {Object.entries(resolveMutation.data.dimensions || {}).map(([key, value]) => (
-                <div key={key} className="flex items-center gap-2 text-sm">
-                  <span className="font-medium">{key}:</span>
-                  <span className={value === 'Unallocated' ? 'text-gray-400' : ''}>{value}</span>
-                  <Badge variant="secondary" className="text-[10px]">
-                    {resolveMutation.data?.dimension_sources?.[key] || 'default'}
-                  </Badge>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
     </div>
   )
 }

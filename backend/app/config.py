@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+
+# Load .env file from project root (if present)
+_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+load_dotenv(_env_path)
 
 
 class Settings(BaseSettings):

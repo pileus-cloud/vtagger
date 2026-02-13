@@ -14,7 +14,6 @@ requests>=2.31.0
 
 # Encryption & Security
 cryptography>=42.0.0
-keyring>=24.3.0
 
 # Configuration
 pyyaml>=6.0.1

@@ -8,5 +8,5 @@ RUN mkdir -p /app/data /app/output
 ENV PYTHONUNBUFFERED=1
 ENV VTAGGER_DATABASE_PATH=/app/data/vtagger.db
 ENV VTAGGER_OUTPUT_DIR=/app/output
-EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8888
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8888"]

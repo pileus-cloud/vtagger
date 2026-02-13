@@ -51,29 +51,37 @@ class SimulationRequest(BaseModel):
     start_date: str
     end_date: str
     vtag_filter_dimensions: Optional[List[str]] = None
+    max_records: int = 0  # 0 = unlimited
+    filter_mode: str = "all"  # "all" or "not_vtagged"
 
 
 class WeekSyncRequest(BaseModel):
     """Request to run a weekly sync."""
-    account_key: str
+    account_key: str = "0"
+    account_keys: Optional[List[str]] = None
     start_date: str
     end_date: str
     vtag_filter_dimensions: Optional[List[str]] = None
+    filter_mode: str = "not_vtagged"  # "all" or "not_vtagged"
 
 
 class MonthSyncRequest(BaseModel):
     """Request to run a month sync."""
-    account_key: str
+    account_key: str = "0"
+    account_keys: Optional[List[str]] = None
     month: str
     vtag_filter_dimensions: Optional[List[str]] = None
+    filter_mode: str = "not_vtagged"
 
 
 class RangeSyncRequest(BaseModel):
     """Request to run a range sync."""
-    account_key: str
+    account_key: str = "0"
+    account_keys: Optional[List[str]] = None
     start_date: str
     end_date: str
     vtag_filter_dimensions: Optional[List[str]] = None
+    filter_mode: str = "not_vtagged"
 
 
 class UploadRequest(BaseModel):
@@ -177,8 +185,69 @@ async def sse_events(request: Request):
 
 @router.get("/progress")
 async def get_progress():
-    """Get current progress state (polling alternative to SSE)."""
-    return progress_tracker.to_dict()
+    """Get current progress state (polling alternative to SSE).
+
+    Merges live progress from sync/simulation engines into the
+    progress_tracker response so the Monitor page always reflects
+    the actual running state.
+    """
+    result = progress_tracker.to_dict()
+
+    # Check if a sync engine is actively running
+    sync_progress = sync_service.get_progress()
+    if sync_progress.get("status") == "running":
+        result["state"] = "fetching_resources"
+        result["message"] = "Sync running"
+        result["detail"] = sync_progress.get("phase", "")
+        pct = sync_progress.get("progress_pct", 0)
+        result["progress"] = pct
+        result["sub_progress"] = pct
+        result["sub_message"] = sync_progress.get("phase", "")
+        result["elapsed_seconds"] = sync_progress.get("elapsed_seconds")
+        result["stats"] = {
+            "processed_assets": sync_progress.get("processed_assets", 0),
+            "matched_assets": sync_progress.get("matched_assets", 0),
+            "unmatched_assets": sync_progress.get("unmatched_assets", 0),
+            "dimension_matches": sync_progress.get("dimension_matches", 0),
+        }
+        return result
+
+    # Check if a simulation engine is actively running
+    sim_results = simulation_service.get_results()
+    if sim_results and sim_results.get("status") == "running":
+        result["state"] = "fetching_resources"
+        result["message"] = "Simulation running"
+        result["detail"] = sim_results.get("phase", "")
+        result["elapsed_seconds"] = sim_results.get("elapsed_seconds")
+        result["stats"] = {
+            "processed_assets": sim_results.get("total_assets", 0),
+            "matched_assets": sim_results.get("matched_assets", 0),
+            "unmatched_assets": sim_results.get("unmatched_assets", 0),
+            "dimension_matches": sim_results.get("dimension_matches", 0),
+        }
+        return result
+
+    # When idle, include last sync result summary if available
+    last_sync = sync_progress.get("last_sync")
+    if last_sync:
+        status = last_sync.get("error_message") and "error" or "complete"
+        result["state"] = status
+        sync_type = last_sync.get("sync_type", "sync")
+        start_date = last_sync.get("start_date", "")
+        end_date = last_sync.get("end_date", "")
+        result["message"] = f"Last {sync_type} sync: {start_date} to {end_date}"
+        result["elapsed_seconds"] = last_sync.get("elapsed_seconds", 0)
+        result["stats"] = {
+            "total_assets": last_sync.get("total_assets", 0),
+            "matched_assets": last_sync.get("matched_assets", 0),
+            "unmatched_assets": last_sync.get("unmatched_assets", 0),
+            "uploaded": last_sync.get("uploaded_count", 0),
+            "payer_accounts": last_sync.get("upload_count", 0),
+        }
+        if last_sync.get("error_message"):
+            result["detail"] = last_sync["error_message"]
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +290,8 @@ async def start_simulation(
                 start_date=request.start_date,
                 end_date=request.end_date,
                 vtag_filter_dimensions=request.vtag_filter_dimensions,
+                max_records=request.max_records,
+                filter_mode=request.filter_mode,
             )
         except Exception as e:
             log_timing(f"Simulation background task error: {e}")
@@ -255,42 +326,62 @@ async def start_week_sync(
     background_tasks: BackgroundTasks,
 ):
     """Start a weekly sync operation."""
-    if progress_tracker.is_running:
-        raise HTTPException(
-            status_code=409, detail="An operation is already running."
-        )
+    log_timing(f"[API] POST /sync/week: {request.start_date} to {request.end_date}, filter={request.filter_mode}")
 
-    try:
-        umbrella_client._ensure_authenticated()
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    if sync_service._engine or sync_service._starting:
+        raise HTTPException(status_code=409, detail="A sync is already running.")
 
-    if not mapping_engine.dimensions:
-        mapping_engine.load_dimensions()
+    effective_key = request.account_key
+    effective_keys = request.account_keys
 
-    if not mapping_engine.dimensions:
-        raise HTTPException(
-            status_code=400, detail="No dimensions loaded. Create dimensions first."
-        )
+    # Mark starting immediately so progress shows right away
+    sync_service.mark_starting("week", request.start_date, request.end_date)
 
     def run_sync():
         try:
+            # Check if cancelled during startup
+            if sync_service._cancelled:
+                log_timing("[API] Week sync cancelled before auth")
+                sync_service._starting = False
+                return
+
+            # Auth and dimension loading happens in background (not blocking event loop)
+            umbrella_client._ensure_authenticated()
+
+            if sync_service._cancelled:
+                log_timing("[API] Week sync cancelled after auth")
+                sync_service._starting = False
+                return
+
+            if not mapping_engine.dimensions:
+                mapping_engine.load_dimensions()
+            if not mapping_engine.dimensions:
+                raise Exception("No dimensions loaded. Create dimensions first.")
+
             sync_service.run_week_sync(
                 umbrella_client=umbrella_client,
                 mapping_engine=mapping_engine,
-                account_key=request.account_key,
+                account_key=effective_key,
+                account_keys=effective_keys,
                 start_date=request.start_date,
                 end_date=request.end_date,
                 vtag_filter_dimensions=request.vtag_filter_dimensions,
+                filter_mode=request.filter_mode,
             )
         except Exception as e:
-            log_timing(f"Week sync background task error: {e}")
+            log_timing(f"Week sync error: {e}")
+            sync_service._starting = False
+            sync_service._last_result = {"status": "error", "error_message": str(e),
+                "sync_type": "week", "start_date": request.start_date, "end_date": request.end_date,
+                "total_assets": 0, "matched_assets": 0, "unmatched_assets": 0, "elapsed_seconds": 0}
+            sync_service._save_last_result()
+            sync_service._engine = None
 
     background_tasks.add_task(run_sync)
 
     return {
         "status": "started",
-        "message": "Week sync started. Use /status/events for progress.",
+        "message": "Week sync started.",
         "start_date": request.start_date,
         "end_date": request.end_date,
     }
@@ -302,41 +393,56 @@ async def start_month_sync(
     background_tasks: BackgroundTasks,
 ):
     """Start a month sync operation."""
-    if progress_tracker.is_running:
-        raise HTTPException(
-            status_code=409, detail="An operation is already running."
-        )
+    log_timing(f"[API] POST /sync/month: {request.month}, filter={request.filter_mode}")
 
-    try:
-        umbrella_client._ensure_authenticated()
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    if sync_service._engine or sync_service._starting:
+        raise HTTPException(status_code=409, detail="A sync is already running.")
 
-    if not mapping_engine.dimensions:
-        mapping_engine.load_dimensions()
+    effective_key = request.account_key
+    effective_keys = request.account_keys
 
-    if not mapping_engine.dimensions:
-        raise HTTPException(
-            status_code=400, detail="No dimensions loaded. Create dimensions first."
-        )
+    sync_service.mark_starting("month", request.month, request.month)
 
     def run_sync():
         try:
+            if sync_service._cancelled:
+                sync_service._starting = False
+                return
+
+            umbrella_client._ensure_authenticated()
+
+            if sync_service._cancelled:
+                sync_service._starting = False
+                return
+
+            if not mapping_engine.dimensions:
+                mapping_engine.load_dimensions()
+            if not mapping_engine.dimensions:
+                raise Exception("No dimensions loaded. Create dimensions first.")
+
             month_sync_service.run_month_sync(
                 umbrella_client=umbrella_client,
                 mapping_engine=mapping_engine,
-                account_key=request.account_key,
+                account_key=effective_key,
+                account_keys=effective_keys,
                 month=request.month,
                 vtag_filter_dimensions=request.vtag_filter_dimensions,
+                filter_mode=request.filter_mode,
             )
         except Exception as e:
-            log_timing(f"Month sync background task error: {e}")
+            log_timing(f"Month sync error: {e}")
+            sync_service._starting = False
+            sync_service._last_result = {"status": "error", "error_message": str(e),
+                "sync_type": "month", "start_date": request.month, "end_date": request.month,
+                "total_assets": 0, "matched_assets": 0, "unmatched_assets": 0, "elapsed_seconds": 0}
+            sync_service._save_last_result()
+            sync_service._engine = None
 
     background_tasks.add_task(run_sync)
 
     return {
         "status": "started",
-        "message": f"Month sync started for {request.month}. Use /status/events for progress.",
+        "message": f"Month sync started for {request.month}.",
         "month": request.month,
     }
 
@@ -347,36 +453,51 @@ async def start_range_sync(
     background_tasks: BackgroundTasks,
 ):
     """Start a range sync operation."""
-    if progress_tracker.is_running:
-        raise HTTPException(
-            status_code=409, detail="An operation is already running."
-        )
+    log_timing(f"[API] POST /sync/range: {request.start_date} to {request.end_date}, filter={request.filter_mode}")
 
-    try:
-        umbrella_client._ensure_authenticated()
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    if sync_service._engine or sync_service._starting:
+        raise HTTPException(status_code=409, detail="A sync is already running.")
 
-    if not mapping_engine.dimensions:
-        mapping_engine.load_dimensions()
+    effective_key = request.account_key
+    effective_keys = request.account_keys
 
-    if not mapping_engine.dimensions:
-        raise HTTPException(
-            status_code=400, detail="No dimensions loaded. Create dimensions first."
-        )
+    sync_service.mark_starting("range", request.start_date, request.end_date)
 
     def run_sync():
         try:
+            if sync_service._cancelled:
+                sync_service._starting = False
+                return
+
+            umbrella_client._ensure_authenticated()
+
+            if sync_service._cancelled:
+                sync_service._starting = False
+                return
+
+            if not mapping_engine.dimensions:
+                mapping_engine.load_dimensions()
+            if not mapping_engine.dimensions:
+                raise Exception("No dimensions loaded. Create dimensions first.")
+
             sync_service.run_range_sync(
                 umbrella_client=umbrella_client,
                 mapping_engine=mapping_engine,
-                account_key=request.account_key,
+                account_key=effective_key,
+                account_keys=effective_keys,
                 start_date=request.start_date,
                 end_date=request.end_date,
                 vtag_filter_dimensions=request.vtag_filter_dimensions,
+                filter_mode=request.filter_mode,
             )
         except Exception as e:
-            log_timing(f"Range sync background task error: {e}")
+            log_timing(f"Range sync error: {e}")
+            sync_service._starting = False
+            sync_service._last_result = {"status": "error", "error_message": str(e),
+                "sync_type": "range", "start_date": request.start_date, "end_date": request.end_date,
+                "total_assets": 0, "matched_assets": 0, "unmatched_assets": 0, "elapsed_seconds": 0}
+            sync_service._save_last_result()
+            sync_service._engine = None
 
     background_tasks.add_task(run_sync)
 
@@ -391,6 +512,7 @@ async def start_range_sync(
 @router.post("/sync/cancel")
 async def cancel_sync():
     """Cancel the currently running operation."""
+    log_timing("[API] POST /sync/cancel")
     sync_service.cancel()
     month_sync_service.cancel()
     simulation_service.cancel()
@@ -400,7 +522,31 @@ async def cancel_sync():
 @router.get("/sync/progress")
 async def get_sync_progress():
     """Get the current sync progress."""
-    return sync_service.get_progress()
+    progress = sync_service.get_progress()
+    log_timing(f"[API] GET /sync/progress -> status={progress.get('status')}, starting={sync_service._starting}, engine={'yes' if sync_service._engine else 'no'}")
+    return progress
+
+
+@router.get("/sync/last-result")
+async def get_last_sync_result():
+    """Get the result of the last sync/upload operation."""
+    result = sync_service.get_last_result()
+    if not result:
+        return {"status": "none", "message": "No sync or upload has been run yet."}
+    return result
+
+
+@router.get("/sync/import-status")
+async def get_import_status():
+    """Poll Umbrella for the import processing status of the last upload."""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, sync_service.get_import_status, umbrella_client
+    )
+    if not result:
+        return {"status": "none", "message": "No upload IDs to check."}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +559,11 @@ async def upload_vtags(
     request: UploadRequest,
     background_tasks: BackgroundTasks,
 ):
-    """Upload vtags from a JSONL output file to Umbrella."""
+    """Upload vtags from a JSONL output file to Umbrella.
+
+    Uses the sync_service upload logic with progress tracking
+    visible via /status/sync/progress and the Monitor page.
+    """
     try:
         umbrella_client._ensure_authenticated()
     except Exception as e:
@@ -426,12 +576,9 @@ async def upload_vtags(
 
     def run_upload():
         try:
-            vtag_upload_service.upload_from_jsonl(
+            sync_service.upload_file(
                 umbrella_client=umbrella_client,
-                account_key=request.account_key,
                 jsonl_file=request.jsonl_file,
-                group_by_payer=request.group_by_payer,
-                description=request.description,
             )
         except Exception as e:
             log_timing(f"Upload background task error: {e}")
@@ -440,7 +587,7 @@ async def upload_vtags(
 
     return {
         "status": "started",
-        "message": "Upload started.",
+        "message": "Upload started. Monitor via /status/sync/progress.",
         "file": request.jsonl_file,
     }
 
@@ -550,9 +697,18 @@ async def get_cleanup_stats():
 
 @router.post("/reset")
 async def reset_all():
-    """Full reset: remove ALL data including dimensions and API keys."""
-    result = cleanup_service.reset_all()
-    return result
+    """Full reset: clear stuck agent state. Does not delete data."""
+    log_timing("[API] POST /reset - force reset")
+    # Clear all sync state flags
+    sync_service._engine = None
+    sync_service._starting = False
+    sync_service._starting_time = None
+    sync_service._cancelled = False
+    sync_service._upload_phase = ""
+    sync_service._upload_progress = {}
+    # Clear progress tracker
+    progress_tracker.reset()
+    return {"message": "Agent state reset successfully.", "state": "idle"}
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,10 @@ def log_timing(msg: str):
     log_line = f"[{timestamp}] {msg}"
     with open(AGENT_LOG_FILE, "a") as f:
         f.write(log_line + "\n")
-    print(log_line, flush=True)
+    try:
+        print(log_line, flush=True)
+    except BrokenPipeError:
+        pass
 
 def clear_log():
     """Clear the agent log file."""

@@ -9,7 +9,6 @@ import type {
   DailyStat,
   StatsSummary,
   WeeklyTrend,
-  VTagUpload,
   CleanupPreview,
   SyncStatus,
 } from '@/types'
@@ -65,7 +64,7 @@ class ApiClient {
     return this.fetch('/auth/validate')
   }
 
-  async createKey(name: string): Promise<{ api_key: string; name: string }> {
+  async createKey(name: string): Promise<{ key: string; name: string }> {
     return this.fetch('/auth/keys', {
       method: 'POST',
       body: JSON.stringify({ name }),
@@ -78,12 +77,12 @@ class ApiClient {
 
   // === Status ===
   async getStatus(): Promise<AgentStatus> {
-    return this.fetch('/status')
+    return this.fetch('/status/progress')
   }
 
   subscribeToStatus(onMessage: (status: AgentStatus) => void): EventSource {
     const key = this.getApiKey()
-    const url = key ? `${API_BASE}/status/stream?api_key=${key}` : `${API_BASE}/status/stream`
+    const url = key ? `${API_BASE}/status/events?api_key=${key}` : `${API_BASE}/status/events`
     const eventSource = new EventSource(url)
     eventSource.onmessage = (event) => {
       const status = JSON.parse(event.data)
@@ -103,30 +102,38 @@ class ApiClient {
     filterMode: string = 'all',
     maxRecords: number = 1000,
     vtagFilterDimensions?: string[],
-  ): Promise<SimulationResults> {
-    return this.fetch('/status/simulation', {
+  ): Promise<{ status: string; message: string }> {
+    // Convert week/year to date range
+    const startDate = this.weekToDateRange(weekNumber, year)
+    return this.fetch('/status/simulate', {
       method: 'POST',
       body: JSON.stringify({
-        week_number: weekNumber,
-        year,
+        account_key: '0',
+        start_date: startDate.start,
+        end_date: startDate.end,
+        vtag_filter_dimensions: vtagFilterDimensions,
         filter_mode: filterMode,
         max_records: maxRecords,
-        vtag_filter_dimensions: vtagFilterDimensions,
       }),
     })
   }
 
   async getSimulationResults(): Promise<SimulationResults | null> {
-    return this.fetch('/status/simulation/results')
+    try {
+      return await this.fetch('/status/simulate/results')
+    } catch {
+      return null
+    }
   }
 
   async clearSimulationResults(): Promise<void> {
-    await this.fetch('/status/simulation/results', { method: 'DELETE' })
+    // No backend endpoint for this - noop
   }
 
   // === Dimensions ===
   async listDimensions(): Promise<DimensionDef[]> {
-    return this.fetch('/dimensions/')
+    const result = await this.fetch<{ dimensions: DimensionDef[]; count: number }>('/dimensions/')
+    return result.dimensions
   }
 
   async createDimension(content: {
@@ -180,17 +187,19 @@ class ApiClient {
   }
 
   async getDiscoveredTags(): Promise<{ tags: DiscoveredTag[]; count: number }> {
-    return this.fetch('/dimensions/discovered-tags')
+    const result = await this.fetch<{ discovered_tags: DiscoveredTag[]; count: number }>('/dimensions/discovered-tags')
+    return { tags: result.discovered_tags, count: result.count }
   }
 
   async resolveTags(tags: Record<string, string>): Promise<{
     dimensions: Record<string, string>
     dimension_sources: Record<string, string>
   }> {
-    return this.fetch('/dimensions/resolve', {
+    const result = await this.fetch<{ resolved: Record<string, string> }>('/dimensions/resolve', {
       method: 'POST',
       body: JSON.stringify({ tags }),
     })
+    return { dimensions: result.resolved, dimension_sources: {} }
   }
 
   async getDimensionHistory(name: string, limit = 50): Promise<{
@@ -210,7 +219,11 @@ class ApiClient {
 
   // === Jobs ===
   async listJobs(limit = 20, offset = 0): Promise<{ jobs: Job[]; count: number }> {
-    return this.fetch(`/jobs?limit=${limit}&offset=${offset}`)
+    const page = Math.floor(offset / limit) + 1
+    const result = await this.fetch<{ jobs: Job[]; count: number; total: number; page: number; page_size: number; total_pages: number }>(
+      `/jobs/?page=${page}&page_size=${limit}`
+    )
+    return { jobs: result.jobs, count: result.total }
   }
 
   async getJob(jobId: number): Promise<Job> {
@@ -218,7 +231,11 @@ class ApiClient {
   }
 
   async getCurrentWeek(): Promise<{ week_number: number; year: number; date: string }> {
-    return this.fetch('/jobs/current/week')
+    const now = new Date()
+    const start = new Date(now.getFullYear(), 0, 1)
+    const diff = now.getTime() - start.getTime()
+    const weekNumber = Math.ceil(diff / (7 * 24 * 60 * 60 * 1000))
+    return { week_number: weekNumber, year: now.getFullYear(), date: now.toISOString().split('T')[0] }
   }
 
   // === Stats ===
@@ -261,7 +278,7 @@ class ApiClient {
     return this.fetch(`/stats/recent?limit=${limit}`)
   }
 
-  // === VTag Upload ===
+  // === Output Files ===
   async listSimulationFiles(): Promise<{
     files: Array<{
       name: string
@@ -275,86 +292,113 @@ class ApiClient {
     return this.fetch('/status/files')
   }
 
-  async startVTagUpload(simulationFile: string): Promise<{
-    upload_id: string
+  // === VTag Upload ===
+  async startVTagUpload(jsonlFile: string): Promise<{
     status: string
+    message: string
+    file: string
   }> {
-    return this.fetch('/status/vtag-upload/start', {
+    return this.fetch('/status/upload', {
       method: 'POST',
-      body: JSON.stringify({ simulation_file: simulationFile }),
+      body: JSON.stringify({
+        account_key: '0',
+        jsonl_file: jsonlFile,
+      }),
     })
   }
 
-  async getVTagUploadStatus(uploadId: string): Promise<{
-    status?: string
-    phase?: string
-    phaseDescription?: string
-    totalRows?: number | null
-    processedRows?: number | null
-    errors?: number | null
-  }> {
-    return this.fetch(`/status/vtag-upload/status/${uploadId}`)
+  async getVTagUploadStatus(uploadId: string): Promise<Record<string, unknown>> {
+    return this.fetch(`/status/uploads/${uploadId}`)
   }
 
-  async getVTagUploadHistory(limit = 20): Promise<VTagUpload[]> {
-    return this.fetch(`/status/vtag-upload/history?limit=${limit}`)
+  async getVTagUploadHistory(limit = 20): Promise<{ uploads: Record<string, unknown>[]; count: number }> {
+    return this.fetch(`/status/uploads?limit=${limit}`)
+  }
+
+  // === Accounts ===
+  async getAccounts(): Promise<{
+    accounts: Array<{
+      accountKey: number
+      accountId: string
+      accountName: string
+      cloudType: string
+      cloudTypeId: number
+    }>
+    count: number
+  }> {
+    return this.fetch('/auth/accounts')
   }
 
   // === Sync ===
-  async getWeeksForMonth(year: number, month: number): Promise<{
-    year: number
-    month: number
-    weeks: Array<{ week_number: number; iso_year: number; start_date: string; end_date: string }>
+  async startWeekSync(weekNumber: number, year: number, filterMode = 'not_vtagged', vtagFilterDimensions?: string[], accountKeys?: string[]): Promise<{
+    status: string; message: string
   }> {
-    return this.fetch(`/status/sync/weeks/${year}/${month}`)
-  }
-
-  async getWeeksForRange(fromYear: number, fromMonth: number, toYear: number, toMonth: number): Promise<{
-    weeks: Array<{ week_number: number; iso_year: number; start_date: string; end_date: string }>
-  }> {
-    return this.fetch(`/status/sync/weeks/range?from_year=${fromYear}&from_month=${fromMonth}&to_year=${toYear}&to_month=${toMonth}`)
-  }
-
-  async startWeekSync(weekNumber: number, year: number, forceAll = false, vtagFilterDimensions?: string[]): Promise<{
-    sync_id: string; status: string
-  }> {
+    const dateRange = this.weekToDateRange(weekNumber, year)
     return this.fetch('/status/sync/week', {
       method: 'POST',
       body: JSON.stringify({
-        week_number: weekNumber, year, force_all: forceAll,
+        account_key: '0',
+        account_keys: accountKeys && accountKeys.length > 0 ? accountKeys : undefined,
+        start_date: dateRange.start,
+        end_date: dateRange.end,
         vtag_filter_dimensions: vtagFilterDimensions,
+        filter_mode: filterMode,
       }),
     })
   }
 
-  async startMonthSync(year: number, month: number, forceAll = false, vtagFilterDimensions?: string[]): Promise<{
-    sync_id: string; status: string
+  async startMonthSync(year: number, month: number, filterMode = 'not_vtagged', vtagFilterDimensions?: string[], accountKeys?: string[]): Promise<{
+    status: string; message: string
   }> {
+    const monthStr = `${year}-${String(month).padStart(2, '0')}`
     return this.fetch('/status/sync/month', {
       method: 'POST',
       body: JSON.stringify({
-        year, month, force_all: forceAll,
+        account_key: '0',
+        account_keys: accountKeys && accountKeys.length > 0 ? accountKeys : undefined,
+        month: monthStr,
         vtag_filter_dimensions: vtagFilterDimensions,
+        filter_mode: filterMode,
       }),
     })
   }
 
-  async startRangeSync(fromYear: number, fromMonth: number, toYear: number, toMonth: number, forceAll = false, vtagFilterDimensions?: string[]): Promise<{
-    sync_id: string; status: string
+  async startRangeSync(fromYear: number, fromMonth: number, toYear: number, toMonth: number, filterMode = 'not_vtagged', vtagFilterDimensions?: string[], accountKeys?: string[]): Promise<{
+    status: string; message: string
   }> {
+    const startDate = `${fromYear}-${String(fromMonth).padStart(2, '0')}-01`
+    const lastDay = new Date(toYear, toMonth, 0).getDate()
+    const endDate = `${toYear}-${String(toMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
     return this.fetch('/status/sync/range', {
       method: 'POST',
       body: JSON.stringify({
-        from_year: fromYear, from_month: fromMonth,
-        to_year: toYear, to_month: toMonth,
-        force_all: forceAll,
+        account_key: '0',
+        account_keys: accountKeys && accountKeys.length > 0 ? accountKeys : undefined,
+        start_date: startDate,
+        end_date: endDate,
         vtag_filter_dimensions: vtagFilterDimensions,
+        filter_mode: filterMode,
       }),
     })
   }
 
+  async getSyncProgress(): Promise<{
+    status: string
+    phase: string
+    processed_assets: number
+    matched_assets: number
+    unmatched_assets: number
+    dimension_matches: number
+    elapsed_seconds: number
+    error_message: string
+  }> {
+    const result = await this.fetch('/status/sync/progress')
+    console.log(`[API] getSyncProgress -> status=${result.status}, phase=${result.phase}`)
+    return result
+  }
+
   async getSyncStatus(syncId: string): Promise<SyncStatus> {
-    return this.fetch(`/status/sync/status/${syncId}`)
+    return this.fetch(`/status/sync/months/${syncId}`)
   }
 
   async getSyncHistory(limit = 20): Promise<Array<{
@@ -362,38 +406,93 @@ class ApiClient {
     total_weeks: number; weeks_completed: number; total_resources: number
     started_at: string; completed_at: string | null
   }>> {
-    return this.fetch(`/status/sync/history?limit=${limit}`)
+    const result = await this.fetch<{ syncs: Array<Record<string, unknown>>; count: number }>(`/status/sync/months?limit=${limit}`)
+    return result.syncs as Array<{
+      sync_id: string; year: number; month: number; status: string
+      total_weeks: number; weeks_completed: number; total_resources: number
+      started_at: string; completed_at: string | null
+    }>
   }
 
-  async cancelSync(syncId: string): Promise<{ message: string }> {
-    return this.fetch(`/status/sync/cancel/${syncId}`, { method: 'POST' })
+  async cancelSync(): Promise<{ status: string; message: string }> {
+    return this.fetch('/status/sync/cancel', { method: 'POST' })
+  }
+
+  async getLastSyncResult(): Promise<Record<string, unknown>> {
+    return this.fetch('/status/sync/last-result')
+  }
+
+  async getImportStatus(): Promise<{
+    status?: string
+    last_result?: Record<string, unknown>
+    import_statuses?: Array<{
+      upload_id: string
+      account_id?: string
+      timestamp?: string
+      sync_type?: string
+      start_date?: string
+      end_date?: string
+      phase: string
+      phase_description?: string
+      total_rows?: number
+      processed_rows?: number
+      errors?: number
+      error?: string
+      status?: string
+      import_mode?: string
+      inserted?: number
+      updated?: number
+      deleted?: number
+    }>
+  }> {
+    return this.fetch('/status/sync/import-status')
   }
 
   // === Cleanup ===
-  async getCleanupPreview(retentionDays = 30): Promise<CleanupPreview> {
-    return this.fetch(`/status/cleanup/preview?retention_days=${retentionDays}`)
+  async getCleanupPreview(_retentionDays = 30): Promise<CleanupPreview> {
+    return this.fetch('/status/cleanup/stats')
   }
 
   async performCleanup(options: {
     deleteFiles?: boolean; cleanDatabase?: boolean; soft?: boolean; retentionDays?: number
-  } = {}): Promise<{
-    message: string; files_deleted: number; bytes_freed: number
-    database_cleaned: Record<string, { deleted: number; error: string | null }>
-  }> {
-    const { deleteFiles = true, cleanDatabase = true, soft = false, retentionDays = 30 } = options
+  } = {}): Promise<Record<string, unknown>> {
+    const { soft = false, retentionDays = 30 } = options
+    const cleanupType = soft ? 'soft' : 'hard'
     return this.fetch('/status/cleanup', {
       method: 'POST',
-      body: JSON.stringify({ delete_files: deleteFiles, clean_database: cleanDatabase, soft, retention_days: retentionDays }),
+      body: JSON.stringify({
+        cleanup_type: cleanupType,
+        older_than_days: soft ? retentionDays : null,
+      }),
     })
   }
 
-  async deleteSingleFile(filename: string): Promise<{ message: string; bytes_freed: number }> {
-    return this.fetch(`/status/cleanup/file/${encodeURIComponent(filename)}`, { method: 'DELETE' })
+  async deleteSingleFile(_filename: string): Promise<{ message: string }> {
+    // Delete via cleanup endpoint - not directly supported
+    throw new Error('Single file deletion not supported. Use cleanup instead.')
+  }
+
+  // === Helpers ===
+
+  private weekToDateRange(weekNumber: number, year: number): { start: string; end: string } {
+    // ISO week to date range
+    const jan4 = new Date(year, 0, 4)
+    const dayOfWeek = jan4.getDay() || 7
+    const mondayWeek1 = new Date(jan4)
+    mondayWeek1.setDate(jan4.getDate() - dayOfWeek + 1)
+
+    const startDate = new Date(mondayWeek1)
+    startDate.setDate(mondayWeek1.getDate() + (weekNumber - 1) * 7)
+    const endDate = new Date(startDate)
+    endDate.setDate(startDate.getDate() + 6)
+
+    const fmt = (d: Date) => d.toISOString().split('T')[0]
+    return { start: fmt(startDate), end: fmt(endDate) }
   }
 
   getUploadedCsvDownloadUrl(uploadId: string): string {
     const key = this.getApiKey()
-    const baseUrl = `${API_BASE}/status/vtag-upload/download/${encodeURIComponent(uploadId)}`
+    const baseUrl = `${API_BASE}/status/files/${encodeURIComponent(uploadId)}`
     return key ? `${baseUrl}?api_key=${key}` : baseUrl
   }
 

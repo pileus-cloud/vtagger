@@ -141,6 +141,12 @@ def _run_migrations(conn: sqlite3.Connection):
             conn.execute("ALTER TABLE tagging_jobs_new RENAME TO tagging_jobs")
             print("  Migration: UNIQUE constraint removed from tagging_jobs.job_date")
 
+    # Migration: Add UNIQUE constraint on daily_stats.stat_date for upsert support
+    if _table_exists(conn, "daily_stats"):
+        if not _has_unique_constraint(conn, "daily_stats", "stat_date"):
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(stat_date)")
+            print("  Migration: Added UNIQUE index on daily_stats.stat_date")
+
     # Migration: Add missing columns to tagging_jobs
     if _table_exists(conn, "tagging_jobs"):
         for col, col_type, default in [
@@ -165,13 +171,12 @@ def init_database():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS api_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                key_name TEXT NOT NULL,
-                encrypted_key TEXT NOT NULL,
-                api_type TEXT DEFAULT 'umbrella',
+                name TEXT NOT NULL UNIQUE,
+                key TEXT NOT NULL,
+                description TEXT,
                 is_active INTEGER DEFAULT 1,
                 last_used_at TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -240,7 +245,7 @@ def init_database():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                stat_date TEXT NOT NULL,
+                stat_date TEXT NOT NULL UNIQUE,
                 total_statements INTEGER DEFAULT 0,
                 tagged_statements INTEGER DEFAULT 0,
                 dimension_matches INTEGER DEFAULT 0,

@@ -135,7 +135,7 @@ class MappingEngine:
             self.load_dimensions()
         return self._required_tag_keys
 
-    def map_resource(self, resource: Dict) -> Dict:
+    def map_resource(self, resource: Dict, tag_column_map: Optional[Dict[str, str]] = None) -> Dict:
         """Map a single resource through all dimensions.
 
         1. Extract tag values from resource
@@ -144,6 +144,11 @@ class MappingEngine:
             a. result = dimension.match(tag_context, dimension_context)
             b. dimension_context[dimension.vtag_name] = result
         4. Return result dict
+
+        Args:
+            resource: Asset/resource dict from the API.
+            tag_column_map: Mapping of customTagValue_N -> tag name
+                (e.g. {"customTagValue_4": "Customer"}).
         """
         t_start = time.time()
         MappingEngine._map_call_count += 1
@@ -169,12 +174,23 @@ class MappingEngine:
             if isinstance(tag, dict):
                 tags[tag.get("key", "")] = tag.get("value", "")
 
-        # Method 2: customTagValue_N columns (dynamic - no hardcoded indices)
+        # Method 2: customTagValue_N columns from v2 API
+        # The API returns custom tags as customTagValue_4, customTagValue_5, etc.
+        # Use the tag_column_map to map back to real tag names.
+        if tag_column_map:
+            for col_name, tag_name in tag_column_map.items():
+                value = resource.get(col_name, "")
+                if value and value != "no tag":
+                    tags[tag_name] = value
+        else:
+            # Fallback: try to extract any customTagValue_N columns as-is
+            for key, value in resource.items():
+                if key.startswith("customTagValue_") and value and value != "no tag":
+                    tags[key] = value
+
+        # Method 3: Direct "Tag: <name>" columns
         for key, value in resource.items():
-            if key.startswith("customTagValue_") and value and value != "no tag":
-                # Map back to tag names using column index
-                tags[key] = value
-            elif key.startswith("Tag: ") and value and value != "no tag":
+            if key.startswith("Tag: ") and value and value != "no tag":
                 tag_name = key[5:]
                 tags[tag_name] = value
 

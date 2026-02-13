@@ -1,44 +1,45 @@
 export interface AgentStatus {
   state: string
+  progress: number
+  message: string
+  detail: string
+  sub_progress: number
+  sub_message: string
   step: number
   total_steps: number
-  message: string
-  sub_progress?: number
-  stats?: Record<string, number>
-  is_running: boolean
-}
-
-export interface ResourceMappingResult {
-  resource_id: string
-  account_id?: string
-  payer_account?: string
-  mapping_source?: string
-  dimensions: Record<string, string>
-  dimension_sources?: Record<string, string>
-  tags_extracted?: Record<string, string>
+  elapsed_seconds: number | null
+  error: string | null
+  stats: Record<string, number>
 }
 
 export interface SimulationResults {
-  completed: boolean
-  simulation: boolean
-  week_number: number
-  year: number
-  duration_seconds: number
-  total_processed: number
+  status: string
+  start_date: string
+  end_date: string
+  total_assets: number
+  matched_assets: number
+  unmatched_assets: number
   dimension_matches: number
-  unallocated: number
-  already_tagged?: number
-  samples: ResourceMappingResult[]
-  unallocated_samples?: Array<{ resource_id: string; account_id: string }>
+  match_rate: number
   vtag_names: string[]
+  dimension_details: Record<string, number>
+  sample_records: Array<{
+    resourceid: string
+    linkedaccid: string
+    payeraccount: string
+    dimensions: Record<string, string>
+    tags: Record<string, string>
+  }>
+  elapsed_seconds: number
+  error_message: string
+  output_file: string
 }
 
 export interface DimensionDef {
-  id: number
   vtag_name: string
-  index_number: number
+  index: number
   kind: string
-  default_value: string
+  defaultValue: string
   source: string
   statement_count: number
   checksum: string
@@ -186,20 +187,11 @@ export interface VTagUpload {
 }
 
 export interface CleanupPreview {
-  files: {
-    simulation_files: number
+  tables: Record<string, number>
+  output_dir: {
+    path: string
+    file_count: number
+    total_size_bytes: number
     total_size_mb: number
-    details: Array<{
-      path: string
-      filename: string
-      size_bytes: number
-      size_mb: number
-      modified: number
-    }>
-  }
-  database: Record<string, { count: number; description: string }>
-  database_older_than_days: {
-    retention_days: number
-    records: Record<string, { count: number; description: string }>
   }
 }

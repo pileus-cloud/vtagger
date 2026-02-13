@@ -8,18 +8,22 @@ services:
     container_name: vtagger-backend
     restart: unless-stopped
     environment:
+      - VTAGGER_USERNAME=${VTAGGER_USERNAME}
+      - VTAGGER_PASSWORD=${VTAGGER_PASSWORD}
       - VTAGGER_DATABASE_PATH=/app/data/vtagger.db
       - VTAGGER_OUTPUT_DIR=/app/output
       - VTAGGER_DEV_MODE=false
-      - VTAGGER_UMBRELLA_API_BASE=https://api.umbrellacost.io/api
+      - VTAGGER_UMBRELLA_API_BASE=${VTAGGER_UMBRELLA_API_BASE:-https://api.umbrellacost.io/api}
       - VTAGGER_MASTER_KEY=${VTAGGER_MASTER_KEY:-}
+      - VTAGGER_BATCH_SIZE=${VTAGGER_BATCH_SIZE:-1000}
+      - VTAGGER_RETENTION_DAYS=${VTAGGER_RETENTION_DAYS:-90}
     volumes:
       - vtagger-data:/app/data
       - vtagger-output:/app/output
     networks:
       - vtagger-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/status/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8888/status/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -32,7 +36,7 @@ services:
     container_name: vtagger-frontend
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "${VTAGGER_FRONTEND_PORT:-8889}:80"
     depends_on:
       backend:
         condition: service_healthy
@@ -46,7 +50,7 @@ services:
     container_name: vtagger-cron
     restart: unless-stopped
     environment:
-      - BACKEND_URL=http://backend:8000
+      - BACKEND_URL=http://backend:8888
       - SYNC_CRON_SCHEDULE=${SYNC_CRON_SCHEDULE:-0 2 * * *}
       - CLEANUP_RETENTION_DAYS=${CLEANUP_RETENTION_DAYS:-30}
     depends_on:

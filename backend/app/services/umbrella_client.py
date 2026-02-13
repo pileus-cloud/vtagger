@@ -27,17 +27,27 @@ from app.services.credential_manager import get_credentials, has_credentials
 from app.services.agent_logger import log_timing
 
 
+TOKENIZER_URL = "https://tokenizer.umbrellacost.io/prod/credentials"
+
+
 class UmbrellaClient:
-    """Client for the Umbrella Cost Management API using Keycloak UM 2.0."""
+    """Client for the Umbrella Cost Management API with dual auth support.
+
+    Supports two authentication backends:
+      1. Cognito/Tokenizer (preferred) - POST to tokenizer.umbrellacost.io
+      2. Keycloak UM 2.0 (fallback) - POST to /v1/authentication/token/generate
+    """
 
     def __init__(self):
         self.base_url = settings.umbrella_api_base
         self.jwt_token: Optional[str] = None
         self.user_key: Optional[str] = None
+        self.temp_apikey: Optional[str] = None  # Raw temp apikey from auth
         self.token_expiry: Optional[datetime] = None
+        self.auth_method: Optional[str] = None  # "cognito" or "um2"
 
     # ------------------------------------------------------------------
-    # Authentication (Keycloak UM 2.0)
+    # Authentication (dual: Cognito + UM 2.0 fallback)
     # ------------------------------------------------------------------
 
     def _ensure_authenticated(self):
@@ -50,12 +60,78 @@ class UmbrellaClient:
         if not self.authenticate():
             raise Exception("Authentication failed")
 
+    def _authenticate_cognito(self, username: str, password: str) -> bool:
+        """Authenticate via Cognito tokenizer endpoint."""
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    TOKENIZER_URL,
+                    json={"username": username, "password": password},
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    self.jwt_token = data.get("Authorization")
+                    self.temp_apikey = data.get("apikey", "")
+                    self.user_key = (
+                        self.temp_apikey.split(":")[0] if self.temp_apikey else None
+                    )
+                    self.token_expiry = datetime.now() + timedelta(hours=1)
+                    self.auth_method = "cognito"
+                    log_timing("AUTH: Authenticated via Cognito tokenizer")
+                    return True
+
+                log_timing(
+                    f"AUTH: Cognito failed - {response.status_code} {response.text}"
+                )
+                return False
+
+        except httpx.RequestError as exc:
+            log_timing(f"AUTH: Cognito request error - {exc}")
+            return False
+
+    def _authenticate_um2(self, username: str, password: str) -> bool:
+        """Authenticate via Keycloak UM 2.0 endpoint."""
+        basic_auth = base64.b64encode(f"{username}:{password}".encode()).decode()
+
+        url = f"{self.base_url}/v1/authentication/token/generate"
+        headers = {
+            "Authorization": f"Basic {basic_auth}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {"username": username, "password": password}
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(url, json=payload, headers=headers)
+
+                if response.status_code == 200:
+                    data = response.json()
+                    self.jwt_token = data.get("Authorization")
+                    self.temp_apikey = data.get("apikey", "")
+                    self.user_key = (
+                        self.temp_apikey.split(":")[0] if self.temp_apikey else None
+                    )
+                    self.token_expiry = datetime.now() + timedelta(hours=1)
+                    self.auth_method = "um2"
+                    log_timing("AUTH: Authenticated via UM 2.0")
+                    return True
+
+                log_timing(
+                    f"AUTH: UM 2.0 failed - {response.status_code} {response.text}"
+                )
+                return False
+
+        except httpx.RequestError as exc:
+            log_timing(f"AUTH: UM 2.0 request error - {exc}")
+            return False
+
     def authenticate(self) -> bool:
         """
-        Authenticate using Keycloak UM 2.0.
+        Authenticate using available methods.
 
-        Reads username/password from the credential manager (env vars, keyring,
-        or encrypted config file) and exchanges them for a JWT bearer token.
+        Tries Cognito tokenizer first, then falls back to Keycloak UM 2.0.
         """
         creds = get_credentials()
         if creds is None:
@@ -67,39 +143,13 @@ class UmbrellaClient:
 
         username, password = creds
 
-        # Basic Auth header
-        basic_auth = base64.b64encode(f"{username}:{password}".encode()).decode()
+        # Try Cognito first (known to work)
+        if self._authenticate_cognito(username, password):
+            return True
 
-        url = f"{self.base_url}/v1/authentication/token/generate"
-        headers = {
-            "Authorization": f"Basic {basic_auth}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        payload = {
-            "username": username,
-            "password": password,
-        }
-
-        try:
-            with httpx.Client(timeout=30.0) as client:
-                response = client.post(url, json=payload, headers=headers)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    self.jwt_token = data.get("Authorization")
-                    temp_apikey = data.get("apikey", "")
-                    self.user_key = temp_apikey.split(":")[0] if temp_apikey else None
-                    self.token_expiry = datetime.now() + timedelta(hours=1)
-                    log_timing("AUTH: Authenticated successfully")
-                    return True
-
-                log_timing(f"AUTH: Failed - {response.status_code} {response.text}")
-                return False
-
-        except httpx.RequestError as exc:
-            log_timing(f"AUTH: Request error - {exc}")
-            return False
+        # Fall back to UM 2.0
+        log_timing("AUTH: Cognito failed, trying UM 2.0 fallback...")
+        return self._authenticate_um2(username, password)
 
     def is_authenticated(self) -> bool:
         """Check whether we hold a valid (non-expired) token."""
@@ -129,42 +179,106 @@ class UmbrellaClient:
         """
         Fetch the list of cloud accounts from Umbrella.
 
+        Tries /v1/users/plain-sub-users first (Cognito-compatible),
+        then falls back to /v1/user-management/accounts (UM 2.0).
+
         Returns:
             Tuple of (aggregate_accounts, individual_accounts).
         """
         self._ensure_authenticated()
 
+        # Try plain-sub-users first, fall back to user-management
+        accounts = self._get_accounts_plain_sub_users()
+        if accounts is None:
+            log_timing("ACCOUNTS: plain-sub-users failed, trying user-management...")
+            accounts = self._get_accounts_um2()
+
+        if accounts is None:
+            raise Exception("Failed to get accounts from both endpoints")
+
+        aggregate_accounts = []
+        individual_accounts = []
+        for acc in accounts:
+            if acc.get("isAllAccounts", False):
+                aggregate_accounts.append(acc)
+            else:
+                individual_accounts.append(acc)
+
+        log_timing(
+            f"ACCOUNTS: {len(aggregate_accounts)} aggregate, "
+            f"{len(individual_accounts)} individual"
+        )
+        return aggregate_accounts, individual_accounts
+
+    def _get_accounts_plain_sub_users(self) -> Optional[List[Dict]]:
+        """Get accounts via /v1/users/plain-sub-users."""
+        url = f"{self.base_url}/v1/users/plain-sub-users"
+        # Use raw temp apikey from auth (as BPTaggingAgent does)
+        headers = {
+            "Authorization": self.jwt_token,
+            "apikey": self.temp_apikey or f"{self.user_key}:-1:-1",
+        }
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.get(url, headers=headers)
+
+                if response.status_code == 401:
+                    self.jwt_token = None
+                    self._ensure_authenticated()
+                    headers["Authorization"] = self.jwt_token
+                    headers["apikey"] = self.temp_apikey or f"{self.user_key}:-1:-1"
+                    response = client.get(url, headers=headers)
+
+                if response.status_code != 200:
+                    log_timing(
+                        f"ACCOUNTS: plain-sub-users failed - "
+                        f"{response.status_code} {response.text[:200]}"
+                    )
+                    return None
+
+                data = response.json()
+                accounts = data.get("accounts", [])
+                log_timing(
+                    f"ACCOUNTS: plain-sub-users returned {len(accounts)} accounts"
+                )
+                return accounts
+
+        except httpx.RequestError as exc:
+            log_timing(f"ACCOUNTS: plain-sub-users request error - {exc}")
+            return None
+
+    def _get_accounts_um2(self) -> Optional[List[Dict]]:
+        """Get accounts via /v1/user-management/accounts."""
         url = f"{self.base_url}/v1/user-management/accounts"
         headers = self._build_headers()
 
-        with httpx.Client(timeout=30.0) as client:
-            response = client.get(url, headers=headers)
-
-            # Retry once on 401
-            if response.status_code == 401:
-                self.jwt_token = None
-                self._ensure_authenticated()
-                headers = self._build_headers()
+        try:
+            with httpx.Client(timeout=30.0) as client:
                 response = client.get(url, headers=headers)
 
-            if response.status_code != 200:
-                raise Exception(f"Failed to get accounts: {response.status_code}")
+                if response.status_code == 401:
+                    self.jwt_token = None
+                    self._ensure_authenticated()
+                    headers = self._build_headers()
+                    response = client.get(url, headers=headers)
 
-            accounts = response.json()
+                if response.status_code != 200:
+                    log_timing(
+                        f"ACCOUNTS: user-management failed - "
+                        f"{response.status_code} {response.text[:200]}"
+                    )
+                    return None
 
-            aggregate_accounts = []
-            individual_accounts = []
-            for acc in accounts:
-                if acc.get("isAllAccounts", False):
-                    aggregate_accounts.append(acc)
-                else:
-                    individual_accounts.append(acc)
+                accounts = response.json()
+                log_timing(
+                    f"ACCOUNTS: user-management returned {len(accounts)} accounts"
+                )
+                return accounts
 
-            log_timing(
-                f"ACCOUNTS: {len(aggregate_accounts)} aggregate, "
-                f"{len(individual_accounts)} individual"
-            )
-            return aggregate_accounts, individual_accounts
+        except httpx.RequestError as exc:
+            log_timing(f"ACCOUNTS: user-management request error - {exc}")
+            return None
 
     # ------------------------------------------------------------------
     # Asset / Resource streaming
@@ -324,8 +438,10 @@ class UmbrellaClient:
     def upload_virtual_tags(
         self,
         csv_path: str,
-        account_id: str,
+        account_id: str = "",
         compressed: bool = True,
+        account_key: str = "",
+        mode: str = "upsert",
     ) -> str:
         """
         Upload virtual tags CSV to Umbrella via presigned URL.
@@ -333,11 +449,15 @@ class UmbrellaClient:
         Parameters
         ----------
         csv_path : str
-            Path to the CSV file on disk.
+            Path to the CSV file on disk (gzipped if compressed=True).
         account_id : str
-            The cloud account ID (AWS or Azure).
+            The cloud account ID (used to look up account_key if not provided).
         compressed : bool
-            Whether to gzip-compress the upload.
+            Whether the file is gzip-compressed.
+        account_key : str
+            Direct account key (skips account lookup if provided).
+        mode : str
+            Import mode: "upsert" (default, safe) or "replaceAll" (destructive).
 
         Returns
         -------
@@ -346,29 +466,28 @@ class UmbrellaClient:
         """
         self._ensure_authenticated()
 
-        # Find account_key for this account_id
-        aggregate_accounts, individual_accounts = self.get_accounts()
-        account_key = None
-
-        for acc in individual_accounts + aggregate_accounts:
-            if acc.get("accountId") == account_id or acc.get("accountName") == account_id:
-                account_key = acc.get("accountKey")
-                break
-
+        # Resolve account_key if not provided directly
         if not account_key:
-            raise Exception(f"Account not found: {account_id}")
+            if not account_id:
+                raise Exception("Either account_id or account_key must be provided")
+            aggregate_accounts, individual_accounts = self.get_accounts()
+            for acc in individual_accounts + aggregate_accounts:
+                if acc.get("accountId") == account_id or acc.get("accountName") == account_id:
+                    account_key = acc.get("accountKey")
+                    break
+            if not account_key:
+                raise Exception(f"Account not found: {account_id}")
 
         headers = self._build_headers(account_key)
 
-        # Step 1: Get presigned upload URL
+        # Step 1: Get presigned upload URL (v2 API, matching BPVtagger per-payer method)
         url = (
             f"{self.base_url.replace('/v1', '')}"
-            f"/v1/governance-tags/resources/import/generate-upload-url"
+            f"/v2/governance-tags/resources/import/generate-upload-url"
         )
         payload = {
-            "accountId": account_id,
             "compressed": compressed,
-            "mode": "replace",
+            "mode": mode,
         }
 
         with httpx.Client(timeout=300.0) as client:
@@ -376,17 +495,27 @@ class UmbrellaClient:
 
             if response.status_code != 200:
                 raise Exception(
-                    f"Failed to get upload URL: {response.status_code}"
+                    f"Failed to get upload URL: {response.status_code} - "
+                    f"{response.text[:200]}"
                 )
 
             result = response.json()
-            upload_url = result.get("uploadUrl")
-            upload_id = result.get("uploadId")
+            upload_url = (
+                result.get("url")
+                or result.get("uploadUrl")
+                or result.get("presignedUrl")
+            )
+            upload_id = result.get("uploadId") or result.get("id")
 
             if not upload_url or not upload_id:
-                raise Exception("Invalid upload URL response")
+                raise Exception(
+                    f"Invalid upload URL response: {json.dumps(result)[:200]}"
+                )
 
-            log_timing(f"UPLOAD: Got presigned URL for upload {upload_id}")
+            log_timing(
+                f"UPLOAD: Got presigned URL for upload {upload_id} "
+                f"(mode={mode})"
+            )
 
             # Step 2: Upload the file
             with open(csv_path, "rb") as f:
@@ -400,9 +529,10 @@ class UmbrellaClient:
                 upload_url, content=file_data, headers=upload_headers
             )
 
-            if upload_response.status_code not in (200, 201):
+            if upload_response.status_code not in (200, 201, 204):
                 raise Exception(
-                    f"Failed to upload file: {upload_response.status_code}"
+                    f"Failed to upload file: {upload_response.status_code} - "
+                    f"{upload_response.text[:200]}"
                 )
 
             log_timing(f"UPLOAD: File uploaded successfully (upload_id={upload_id})")

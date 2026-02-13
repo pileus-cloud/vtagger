@@ -74,9 +74,9 @@ export function SettingsPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-primary-800">New Key Generated</p>
-                  <code className="text-xs font-mono text-primary-700">{createKeyMutation.data.api_key}</code>
+                  <code className="text-xs font-mono text-primary-700">{createKeyMutation.data.key}</code>
                 </div>
-                <Button size="sm" variant="ghost" onClick={() => handleCopyKey(createKeyMutation.data!.api_key)}>
+                <Button size="sm" variant="ghost" onClick={() => handleCopyKey(createKeyMutation.data!.key)}>
                   {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                 </Button>
               </div>
@@ -112,13 +112,15 @@ export function SettingsPage() {
 
           {cleanupPreviewQuery.data && (
             <div className="p-3 bg-gray-50 rounded-lg space-y-2">
-              <p className="text-sm font-medium">Preview</p>
-              <p className="text-xs text-gray-500">
-                Files: {cleanupPreviewQuery.data.files.simulation_files} ({cleanupPreviewQuery.data.files.total_size_mb.toFixed(1)} MB)
-              </p>
-              {Object.entries(cleanupPreviewQuery.data.database).map(([table, info]) => (
+              <p className="text-sm font-medium">Current Data</p>
+              {cleanupPreviewQuery.data.output_dir && (
+                <p className="text-xs text-gray-500">
+                  Files: {cleanupPreviewQuery.data.output_dir.file_count} ({cleanupPreviewQuery.data.output_dir.total_size_mb?.toFixed(1) ?? 0} MB)
+                </p>
+              )}
+              {cleanupPreviewQuery.data.tables && Object.entries(cleanupPreviewQuery.data.tables).map(([table, count]) => (
                 <p key={table} className="text-xs text-gray-500">
-                  {table}: {info.count} records
+                  {table}: {count} records
                 </p>
               ))}
             </div>
@@ -145,7 +147,7 @@ export function SettingsPage() {
             </div>
             <div className="p-3 bg-gray-50 rounded-lg">
               <p className="text-xs text-gray-500">Dimensions Loaded</p>
-              <p className="text-sm font-medium">{(dimensionsQuery.data as Array<unknown>)?.length ?? 0}</p>
+              <p className="text-sm font-medium">{dimensionsQuery.data?.length ?? 0}</p>
             </div>
             <div className="p-3 bg-gray-50 rounded-lg">
               <p className="text-xs text-gray-500">Version</p>
