@@ -2,6 +2,8 @@
 #
 # Two-stage build: Node builds the app, nginx serves the static files.
 # Nginx proxies /api/* requests to the backend container on port 8888.
+
+# Build stage
 FROM node:20-alpine AS builder
 
 WORKDIR /app
@@ -20,6 +22,9 @@ RUN npm run build
 
 # Production Stage
 FROM nginx:alpine
+
+LABEL description="VTagger Frontend - React web UI served by nginx. \
+Proxies /api/* requests to the backend container on port 8888."
 
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
