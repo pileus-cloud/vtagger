@@ -11,6 +11,7 @@ import type {
   WeeklyTrend,
   CleanupPreview,
   SyncStatus,
+  SyncProgressResult,
 } from '@/types'
 
 const API_BASE = '/api'
@@ -382,17 +383,8 @@ class ApiClient {
     })
   }
 
-  async getSyncProgress(): Promise<{
-    status: string
-    phase: string
-    processed_assets: number
-    matched_assets: number
-    unmatched_assets: number
-    dimension_matches: number
-    elapsed_seconds: number
-    error_message: string
-  }> {
-    const result = await this.fetch('/status/sync/progress')
+  async getSyncProgress(): Promise<SyncProgressResult> {
+    const result = await this.fetch<SyncProgressResult>('/status/sync/progress')
     console.log(`[API] getSyncProgress -> status=${result.status}, phase=${result.phase}`)
     return result
   }

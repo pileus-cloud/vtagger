@@ -22,6 +22,7 @@ export interface SimulationResults {
   dimension_matches: number
   match_rate: number
   vtag_names: string[]
+  tag_keys: string[]
   dimension_details: Record<string, number>
   sample_records: Array<{
     resourceid: string
@@ -184,6 +185,29 @@ export interface VTagUpload {
   started_at: string
   completed_at: string
   created_at: string
+}
+
+export interface SyncProgressResult {
+  status: string
+  phase: string
+  processed_assets: number
+  matched_assets: number
+  unmatched_assets: number
+  dimension_matches: number
+  elapsed_seconds: number
+  error_message: string
+  progress_pct: number
+  last_sync?: {
+    status: string
+    total_assets: number
+    matched_assets: number
+    unmatched_assets: number
+    uploaded_count: number
+    start_date: string
+    end_date: string
+    sync_type: string
+    elapsed_seconds: number
+  } | null
 }
 
 export interface CleanupPreview {
