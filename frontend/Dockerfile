@@ -1,4 +1,7 @@
-# Frontend Dockerfile - Build Stage
+# VTagger Frontend - React + Vite served by nginx
+#
+# Two-stage build: Node builds the app, nginx serves the static files.
+# Nginx proxies /api/* requests to the backend container on port 8888.
 FROM node:20-alpine AS builder
 
 WORKDIR /app

@@ -1,3 +1,11 @@
+# VTagger Backend - FastAPI + SQLite API server
+#
+# Provides REST API for dimension management, sync operations,
+# simulation, monitoring, and Umbrella API integration.
+#
+# Credentials are passed via environment variables (VTAGGER_USERNAME, VTAGGER_PASSWORD).
+# Data is persisted in /app/data (SQLite DB) and /app/output (CSV/JSONL files).
+
 FROM python:3.11-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y gcc libffi-dev curl && rm -rf /var/lib/apt/lists/*
