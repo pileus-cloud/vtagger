@@ -46,9 +46,12 @@ docker compose up -d
 ```
 
 This starts three containers:
-- **vtagger-backend** -- API server on port 8888 (internal)
-- **vtagger-frontend** -- Web UI on port 8889 (exposed)
-- **vtagger-cron** -- Daily sync job (runs at 2 AM UTC by default)
+
+| Container | Image | Description |
+|-----------|-------|-------------|
+| **vtagger-backend** | `python:3.11-slim` | FastAPI + SQLite API server. Handles dimension management, sync operations, simulation, and Umbrella API integration. Port 8888 (internal). |
+| **vtagger-frontend** | `nginx:alpine` | React web UI built with Vite, served by nginx. Proxies `/api/*` to backend. Port 8889 (exposed). |
+| **vtagger-cron** | `alpine:3.19` | Daily sync scheduler. Starts a week sync for the current ISO week, polls until complete (2h timeout), then runs soft cleanup of old files. |
 
 ### 3. Open the UI
 
@@ -84,18 +87,31 @@ docker compose exec cron /app/sync-and-cleanup.sh
 
 All settings are configured via environment variables in `.env`:
 
+**Backend (vtagger-backend):**
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `VTAGGER_USERNAME` | *(required)* | Umbrella API username |
 | `VTAGGER_PASSWORD` | *(required)* | Umbrella API password |
-| `VTAGGER_UMBRELLA_API_BASE` | `https://api.umbrellacost.io/api` | Umbrella API base URL |
-| `VTAGGER_FRONTEND_PORT` | `8889` | Port for the web UI |
+| `VTAGGER_INSTANCE` | `mycompany` | Umbrella instance name |
+| `VTAGGER_UMBRELLA_API_BASE` | `https://app.anodot.com/api` | Umbrella API base URL |
 | `VTAGGER_BATCH_SIZE` | `1000` | Assets per batch during fetch |
 | `VTAGGER_RETENTION_DAYS` | `90` | Days to keep job history |
-| `SYNC_CRON_SCHEDULE` | `0 2 * * *` | Cron schedule for daily sync |
-| `CLEANUP_RETENTION_DAYS` | `30` | Days to keep output files |
 | `VTAGGER_DEV_MODE` | `false` | Skip API key auth (dev only) |
 | `VTAGGER_MASTER_KEY` | *(auto)* | Encryption key for credentials |
+
+**Frontend (vtagger-frontend):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VTAGGER_FRONTEND_PORT` | `8889` | Port for the web UI |
+
+**Cron (vtagger-cron):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SYNC_CRON_SCHEDULE` | `0 2 * * *` | Cron schedule for daily sync |
+| `CLEANUP_RETENTION_DAYS` | `30` | Days to keep output files |
 
 ---
 
