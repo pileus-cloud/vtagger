@@ -1,3 +1,6 @@
+# Auto-detect docker compose v2 plugin vs docker-compose v1 standalone
+DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+
 .PHONY: help build up down logs shell backend-shell frontend-shell clean dev cron-logs cron-run-now
 
 help:
@@ -17,28 +20,28 @@ help:
 	@echo "  make cron-run-now   - Trigger sync+cleanup manually"
 
 build:
-	docker compose build
+	$(DOCKER_COMPOSE) build
 
 up:
-	docker compose up -d
+	$(DOCKER_COMPOSE) up -d
 
 down:
-	docker compose down
+	$(DOCKER_COMPOSE) down
 
 logs:
-	docker compose logs -f
+	$(DOCKER_COMPOSE) logs -f
 
 shell:
-	docker compose exec backend /bin/bash
+	$(DOCKER_COMPOSE) exec backend /bin/bash
 
 backend-shell:
-	docker compose exec backend /bin/bash
+	$(DOCKER_COMPOSE) exec backend /bin/bash
 
 frontend-shell:
-	docker compose exec frontend /bin/sh
+	$(DOCKER_COMPOSE) exec frontend /bin/sh
 
 clean:
-	docker compose down -v
+	$(DOCKER_COMPOSE) down -v
 	docker system prune -f
 
 dev-backend:
@@ -62,7 +65,7 @@ cli-dimensions:
 
 # Cron commands
 cron-logs:
-	docker compose logs -f cron
+	$(DOCKER_COMPOSE) logs -f cron
 
 cron-run-now:
-	docker compose exec cron /app/sync-and-cleanup.sh
+	$(DOCKER_COMPOSE) exec cron /app/sync-and-cleanup.sh

@@ -62,7 +62,14 @@ VTAGGER_PASSWORD=your-umbrella-password
 ### 2. Start all services
 
 ```bash
+# If you have Docker Compose plugin (Docker Desktop, newer installs):
 docker compose up -d
+
+# If you have standalone docker-compose (Colima, older installs):
+docker-compose up -d
+
+# Or use Make (auto-detects which command is available):
+make up
 ```
 
 This starts three containers:
@@ -83,18 +90,20 @@ On first visit, you'll be prompted to create an API key. Save it -- you'll need 
 
 ### Docker Commands
 
+> **Tip:** Use `make` commands (e.g., `make up`, `make logs`, `make down`) to avoid worrying about `docker compose` vs `docker-compose`. The Makefile auto-detects which is available.
+
 ```bash
 # Start
-docker compose up -d
+docker compose up -d        # or: make up
 
 # View logs
-docker compose logs -f
+docker compose logs -f       # or: make logs
 
 # Stop
-docker compose down
+docker compose down          # or: make down
 
 # Rebuild after code changes
-docker compose up -d --build
+docker compose up -d --build # or: make build && make up
 
 # Remove everything including data volumes
 docker compose down -v
