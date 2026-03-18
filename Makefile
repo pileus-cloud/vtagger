@@ -17,28 +17,28 @@ help:
 	@echo "  make cron-run-now   - Trigger sync+cleanup manually"
 
 build:
-	docker-compose build
+	docker compose build
 
 up:
-	docker-compose up -d
+	docker compose up -d
 
 down:
-	docker-compose down
+	docker compose down
 
 logs:
-	docker-compose logs -f
+	docker compose logs -f
 
 shell:
-	docker-compose exec backend /bin/bash
+	docker compose exec backend /bin/bash
 
 backend-shell:
-	docker-compose exec backend /bin/bash
+	docker compose exec backend /bin/bash
 
 frontend-shell:
-	docker-compose exec frontend /bin/sh
+	docker compose exec frontend /bin/sh
 
 clean:
-	docker-compose down -v
+	docker compose down -v
 	docker system prune -f
 
 dev-backend:
@@ -62,7 +62,7 @@ cli-dimensions:
 
 # Cron commands
 cron-logs:
-	docker-compose logs -f cron
+	docker compose logs -f cron
 
 cron-run-now:
-	docker-compose exec cron /app/sync-and-cleanup.sh
+	docker compose exec cron /app/sync-and-cleanup.sh

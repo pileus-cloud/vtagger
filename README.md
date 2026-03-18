@@ -24,6 +24,26 @@ Frontend (React + Vite)  -->  Backend (FastAPI + SQLite)  -->  Umbrella API
 
 ## Quick Start (Docker)
 
+### Prerequisites
+
+You need a Docker runtime. Either option works:
+
+- **[Docker Desktop](https://www.docker.com/products/docker-desktop/)** -- install and start the app
+- **[Colima](https://github.com/abersheehy/colima)** -- lightweight alternative (macOS/Linux):
+
+```bash
+# Install (macOS)
+brew install colima docker docker-compose
+
+# Start Colima (allocate resources as needed)
+colima start --cpu 2 --memory 4
+
+# Verify Docker is working
+docker info
+```
+
+> **Colima note:** Colima must be running (`colima start`) before any `docker` or `docker compose` commands. To stop: `colima stop`. To auto-start on login: `brew services start colima`.
+
 ### 1. Clone and configure
 
 ```bash
